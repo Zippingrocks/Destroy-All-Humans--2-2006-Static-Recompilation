@@ -22,6 +22,7 @@
 #include <stdint.h>
 #include <math.h>
 #include <windows.h>  /* GetCurrentThreadId, for multi-thread-aware tracing */
+#include "trace_control.h"
 
 /* ── ICALL trace ring buffer ───────────────────────────────── */
 
@@ -78,7 +79,7 @@ void recomp_icall_watch_log(uint32_t this_ptr, uint32_t target, uint32_t line)
     static volatile long s_count;
     long n = InterlockedIncrement(&s_count);
     if (n <= 60)
-        fprintf(stderr, "[ICALL-WATCH] #%ld this=0x%08X target=0x%08X macro_line=%u esp=0x%08X\n",
+        DAH2_TRACE_FPRINTF(stderr, "[ICALL-WATCH] #%ld this=0x%08X target=0x%08X macro_line=%u esp=0x%08X\n",
                 n, this_ptr, target, line, g_esp);
 }
 
@@ -88,21 +89,21 @@ void recomp_trace_enter(const char *name, uint32_t va)
 {
     uint32_t guest_return = (g_esp >= 0x10000u && g_esp < 0x01000000u)
         ? *manual_mem32(g_esp) : 0;
-    fprintf(stderr, "[TRACE] -> %s (0x%08X) ret=%08X esp=%08X eax=%08X ebx=%08X esi=%08X edi=%08X\n",
+    DAH2_TRACE_FPRINTF(stderr, "[TRACE] -> %s (0x%08X) ret=%08X esp=%08X eax=%08X ebx=%08X esi=%08X edi=%08X\n",
             name, va, guest_return, g_esp, g_eax, g_ebx, g_esi, g_edi);
     fflush(stderr);
 }
 
 void recomp_trace_exit(const char *name, uint32_t va)
 {
-    fprintf(stderr, "[TRACE] <- %s (0x%08X) esp=%08X eax=%08X ebx=%08X esi=%08X edi=%08X\n",
+    DAH2_TRACE_FPRINTF(stderr, "[TRACE] <- %s (0x%08X) esp=%08X eax=%08X ebx=%08X esi=%08X edi=%08X\n",
             name, va, g_esp, g_eax, g_ebx, g_esi, g_edi);
     fflush(stderr);
 }
 
 void recomp_trace_esp(const char *name, const char *tag)
 {
-    fprintf(stderr, "[TRACE]    %s %s esp=%08X eax=%08X ebx=%08X esi=%08X edi=%08X\n",
+    DAH2_TRACE_FPRINTF(stderr, "[TRACE]    %s %s esp=%08X eax=%08X ebx=%08X esi=%08X edi=%08X\n",
             name, tag, g_esp, g_eax, g_ebx, g_esi, g_edi);
     fflush(stderr);
 }
@@ -124,9 +125,9 @@ void recomp_trace_esp(const char *name, const char *tag)
  *   // Trace wrapper: log entry/exit around the generated function
  *   extern void sub_00012345(void);
  *   static void traced_sub_00012345(void) {
- *       fprintf(stderr, "[TRACE] sub_00012345 entered, eax=0x%08X\n", g_eax);
+ *       DAH2_TRACE_FPRINTF(stderr, "[TRACE] sub_00012345 entered, eax=0x%08X\n", g_eax);
  *       sub_00012345();
- *       fprintf(stderr, "[TRACE] sub_00012345 returned, eax=0x%08X\n", g_eax);
+ *       DAH2_TRACE_FPRINTF(stderr, "[TRACE] sub_00012345 returned, eax=0x%08X\n", g_eax);
  *   }
  *
  *   // Stub: skip a function entirely (return 0 in eax)
@@ -232,7 +233,7 @@ static void override_sub_000F78B0(void)
                 *manual_mem32(manager + 0x7E18) = current_saved;
             static unsigned suppress_count;
             if (++suppress_count <= 8)
-                fprintf(stderr,
+                DAH2_TRACE_FPRINTF(stderr,
                     "[FRAME-CAP] suppressed exit-bit manager=%08X current=%08X (#%u)\n",
                     manager, current_saved, suppress_count);
         }
@@ -252,7 +253,7 @@ static void trace_heap_alloc(void)
     uint32_t size = *manual_mem32(sp + 4);
     sub_001A7110();
     if (g_esp != sp + 12 || g_esi != si || g_edi != di || g_ebx != bx)
-        fprintf(stderr, "[HEAP-ABI] alloc size=%u sp=%08X->%08X esi=%08X->%08X edi=%08X->%08X ebx=%08X->%08X\n", size, sp, g_esp, si, g_esi, di, g_edi, bx, g_ebx);
+        DAH2_TRACE_FPRINTF(stderr, "[HEAP-ABI] alloc size=%u sp=%08X->%08X esi=%08X->%08X edi=%08X->%08X ebx=%08X->%08X\n", size, sp, g_esp, si, g_esi, di, g_edi, bx, g_ebx);
 }
 static void trace_heap_free(void)
 {
@@ -260,7 +261,7 @@ static void trace_heap_free(void)
     uint32_t address = *manual_mem32(sp + 4);
     sub_001A7160();
     if (g_esp != sp + 8 || g_esi != si || g_edi != di || g_ebx != bx)
-        fprintf(stderr, "[HEAP-ABI] free address=%08X sp=%08X->%08X esi=%08X->%08X edi=%08X->%08X ebx=%08X->%08X\n", address, sp, g_esp, si, g_esi, di, g_edi, bx, g_ebx);
+        DAH2_TRACE_FPRINTF(stderr, "[HEAP-ABI] free address=%08X sp=%08X->%08X esi=%08X->%08X edi=%08X->%08X ebx=%08X->%08X\n", address, sp, g_esp, si, g_esi, di, g_edi, bx, g_ebx);
 }
 
 /* sub_0008F860 tail-calls sub_0008F7B0 when the event tag matches 0xD2EB1B81.
@@ -382,7 +383,7 @@ void sub_00161E50(void)
         static volatile long s_lookup_count;
         long n = InterlockedIncrement(&s_lookup_count);
         if (n <= 60)
-            fprintf(stderr, "[LOOKUP] tid=%lu #%ld key=0x%08X node=0x%08X flag=%u callsite=0x%08X\n",
+            DAH2_TRACE_FPRINTF(stderr, "[LOOKUP] tid=%lu #%ld key=0x%08X node=0x%08X flag=%u callsite=0x%08X\n",
                     (unsigned long)GetCurrentThreadId(), n, key, node, flag, *manual_mem32(g_esp));
     }
 
@@ -393,7 +394,7 @@ void sub_00161E50(void)
             static volatile long s_dispatch_count;
             long dn = InterlockedIncrement(&s_dispatch_count);
             if (dn <= 40)
-                fprintf(stderr, "[DISPATCH] tid=%lu #%ld key=0x%08X node=0x%08X vtbl=0x%08X target=0x%08X\n",
+                DAH2_TRACE_FPRINTF(stderr, "[DISPATCH] tid=%lu #%ld key=0x%08X node=0x%08X vtbl=0x%08X target=0x%08X\n",
                         (unsigned long)GetCurrentThreadId(), dn, key, node, vtbl, target);
             uint32_t protect_esi = g_esi, protect_edi = g_edi, protect_ebx = g_ebx;
             uint32_t call_esp = g_esp;
@@ -492,7 +493,7 @@ static void override_sub_001C7FB9(void)
     g_eax = xbox_HeapAlloc(size, 16u);
     static unsigned sbh_count;
     if (++sbh_count <= 8)
-        fprintf(stderr, "[SBH-BYPASS] #%u size=%u → 0x%08X\n",
+        DAH2_TRACE_FPRINTF(stderr, "[SBH-BYPASS] #%u size=%u → 0x%08X\n",
                 sbh_count, size, g_eax);
     g_esp += 12;  /* ret 8: return addr + 2 args */
 }
@@ -647,7 +648,7 @@ void sub_002117C0(void)
         uint32_t callback_ordinal = 0;
         if (icall_target == 0x001018D0u) callback_ordinal = ++callback_1018_count;
         if (icall_target == 0x001018D0u || icall_target == 0x00124DC0u) {
-            fprintf(stderr,
+            DAH2_TRACE_FPRINTF(stderr,
                     "[SCRIPT-CALL] target=%08X ordinal=%u ax=%08X cx=%08X dx=%08X "
                     "bx=%08X sp=%08X bp=%08X si=%08X di=%08X "
                     "top=%08X s0=%08X s1=%08X s2=%08X s3=%08X\n",
@@ -657,7 +658,7 @@ void sub_002117C0(void)
                     *manual_mem32(g_esp + 8), *manual_mem32(g_esp + 12));
             if (icall_target == 0x001018D0u && callback_ordinal >= 8u) {
                 uint32_t top = *manual_mem32(protect_esi);
-                fprintf(stderr,
+                DAH2_TRACE_FPRINTF(stderr,
                         "[SCRIPT-STATE] ordinal=%u state0=%08X state4=%08X state8=%08X "
                         "stateC=%08X state10=%08X state14=%08X state18=%08X state1C=%08X "
                         "v9=%08X/%08X v8=%08X/%08X v7=%08X/%08X v6=%08X/%08X "
@@ -677,7 +678,7 @@ void sub_002117C0(void)
                         *manual_mem32(top - 16), *manual_mem32(top - 12),
                         *manual_mem32(top - 8), *manual_mem32(top - 4));
                 if (callback_ordinal == 9u) {
-                    fprintf(stderr,
+                    DAH2_TRACE_FPRINTF(stderr,
                             "[SCRIPT-GUEST-STACK] "
                             "w00=%08X w01=%08X w02=%08X w03=%08X w04=%08X w05=%08X w06=%08X w07=%08X "
                             "w08=%08X w09=%08X w10=%08X w11=%08X w12=%08X w13=%08X w14=%08X w15=%08X "
@@ -700,7 +701,7 @@ void sub_002117C0(void)
         if (fn) fn();
         else { recomp_icall_fail_log(icall_target); g_esp = icall_esp; g_eax = 0; }
         if (icall_target == 0x001018D0u || icall_target == 0x00124DC0u) {
-            fprintf(stderr,
+            DAH2_TRACE_FPRINTF(stderr,
                     "[SCRIPT-RETURN] target=%08X ax=%08X cx=%08X dx=%08X "
                     "bx=%08X sp=%08X bp=%08X si=%08X di=%08X top=%08X\n",
                     icall_target, g_eax, g_ecx, g_edx, g_ebx, g_esp,
@@ -974,7 +975,7 @@ void sub_000F96E0(void)
     if (arg < 0x10000u) {
         static unsigned s_f96e0_guard;
         if (++s_f96e0_guard <= 8)
-            fprintf(stderr,
+            DAH2_TRACE_FPRINTF(stderr,
                 "[F96E0-GUARD] skipped vtable[2] call: bad arg=0x%08X eax=0x%08X (#%u)\n",
                 arg, g_eax, s_f96e0_guard);
         g_esp += 4;  /* ret 0: pop sub_000F96E0's return address */
@@ -1016,15 +1017,15 @@ static void traced_sub_0015FF70(void)
     uint32_t manager = g_ecx;
     long n = InterlockedIncrement(&s_call_count);
     if (n <= 24) {
-        fprintf(stderr, "[RESOURCE-LOAD] tid=%lu call #%ld desc=%08X ecx=%08X esp=%08X retsite=%08X\n",
+        DAH2_TRACE_FPRINTF(stderr, "[RESOURCE-LOAD] tid=%lu call #%ld desc=%08X ecx=%08X esp=%08X retsite=%08X\n",
                 (unsigned long)GetCurrentThreadId(), n, desc, g_ecx, g_esp, *manual_mem32(g_esp));
-        fprintf(stderr, "  desc[0..9]=%08X %08X %08X %08X %08X %08X %08X %08X %08X %08X\n",
+        DAH2_TRACE_FPRINTF(stderr, "  desc[0..9]=%08X %08X %08X %08X %08X %08X %08X %08X %08X %08X\n",
                 *manual_mem32(desc+0), *manual_mem32(desc+4), *manual_mem32(desc+8),
                 *manual_mem32(desc+0xC), *manual_mem32(desc+0x10), *manual_mem32(desc+0x14),
                 *manual_mem32(desc+0x18), *manual_mem32(desc+0x1C), *manual_mem32(desc+0x20),
                 *manual_mem32(desc+0x24));
         if (g_esp >= 0x10000u && g_esp < 0x04000000u) {
-            fprintf(stderr, "  stack[0..7]=%08X %08X %08X %08X %08X %08X %08X %08X\n",
+            DAH2_TRACE_FPRINTF(stderr, "  stack[0..7]=%08X %08X %08X %08X %08X %08X %08X %08X\n",
                     *manual_mem32(g_esp+0), *manual_mem32(g_esp+4), *manual_mem32(g_esp+8),
                     *manual_mem32(g_esp+0xC), *manual_mem32(g_esp+0x10), *manual_mem32(g_esp+0x14),
                     *manual_mem32(g_esp+0x18), *manual_mem32(g_esp+0x1C));
@@ -1035,13 +1036,13 @@ static void traced_sub_0015FF70(void)
         uint32_t root = *manual_mem32(manager + 8);
         uint32_t child = root ? *manual_mem32(root + 0x0C) : 0;
         uint32_t grid = *manual_mem32(manager + 0x44);
-        fprintf(stderr,
+        DAH2_TRACE_FPRINTF(stderr,
                 "[RESOURCE-LOAD] return #%ld manager=%08X root=%08X child=%08X grid=%08X dims=%u,%u\n",
                 n, manager, root, child, grid,
                 grid ? *manual_mem32(grid + 8) : 0,
                 grid ? *manual_mem32(grid + 0x0C) : 0);
         for (unsigned i = 0; child && i < 16; ++i) {
-            fprintf(stderr,
+            DAH2_TRACE_FPRINTF(stderr,
                     "  scene-child[%u]=%08X parent=%08X child=%08X sibling=%08X payload=%08X\n",
                     i, child, *manual_mem32(child + 8), *manual_mem32(child + 0x0C),
                     *manual_mem32(child + 0x40), *manual_mem32(child + 0xE8));
@@ -1062,7 +1063,7 @@ static void traced_sub_001602D0(void)
 {
     static unsigned s_call_count;
     if (++s_call_count <= 32)
-        fprintf(stderr, "[VT-0x30-CLEAR] call #%u ecx=%08X esp=%08X\n",
+        DAH2_TRACE_FPRINTF(stderr, "[VT-0x30-CLEAR] call #%u ecx=%08X esp=%08X\n",
                 s_call_count, g_ecx, g_esp);
     sub_001602D0();
 }
@@ -1083,12 +1084,12 @@ static void traced_sub_0015D130(void)
     uint32_t this_obj = g_ecx;
     DWORD tid = GetCurrentThreadId();
     if (n <= 24)
-        fprintf(stderr, "[SUBOBJ-0130] tid=%lu call #%u this=%08X desc=%08X desc[0x14]=%08X desc[0x18]=%08X\n",
+        DAH2_TRACE_FPRINTF(stderr, "[SUBOBJ-0130] tid=%lu call #%u this=%08X desc=%08X desc[0x14]=%08X desc[0x18]=%08X\n",
                 (unsigned long)tid, n, this_obj, desc, *manual_mem32(desc+0x14), *manual_mem32(desc+0x18));
     sub_0015D130();
     uint32_t populated_subobj = *manual_mem32(this_obj+0xE8);
     if (n <= 24)
-        fprintf(stderr, "[SUBOBJ-0130] tid=%lu call #%u returned eax=%08X this[0xE8]=%08X\n",
+        DAH2_TRACE_FPRINTF(stderr, "[SUBOBJ-0130] tid=%lu call #%u returned eax=%08X this[0xE8]=%08X\n",
                 (unsigned long)tid, n, g_eax, populated_subobj);
     /* TEMP: arm the ICALL "this"-pointer watch (see recomp_types.h) on the
      * first successfully populated sub-object, to catch the vtable+0x1C
@@ -1115,7 +1116,7 @@ void sub_00132D40(void)
 {
     long n = InterlockedIncrement(&g_node_walk_count_132D40);
     if (n <= 20 || (n % 1000) == 0)
-        fprintf(stderr, "[NODE-WALK-132D40] count=%ld ecx=0x%08X\n", n, g_ecx);
+        DAH2_TRACE_FPRINTF(stderr, "[NODE-WALK-132D40] count=%ld ecx=0x%08X\n", n, g_ecx);
     g_eax = 1;
     *(volatile uint16_t *)manual_mem8(g_ecx + 0xC0) = 1;
     *(volatile uint16_t *)manual_mem8(g_ecx + 0xBE) = 1;
@@ -1158,7 +1159,7 @@ void sub_00132CD0(void)
 
     long n = InterlockedIncrement(&g_node_walk_count_132CD0);
     if (n <= 20 || (n % 1000) == 0)
-        fprintf(stderr, "[NODE-WALK-132CD0] count=%ld obj=0x%08X arg=0x%08X\n", n, obj, arg);
+        DAH2_TRACE_FPRINTF(stderr, "[NODE-WALK-132CD0] count=%ld obj=0x%08X arg=0x%08X\n", n, obj, arg);
 
     *(volatile uint16_t *)manual_mem8(obj + 0xC0) = 1;
     *(volatile uint16_t *)manual_mem8(obj + 0xBE) = 1;
@@ -1260,7 +1261,7 @@ void sub_00012820(void)
 
     long n = InterlockedIncrement(&g_node_walk_count_12820);
     if (n <= 20 || (n % 1000) == 0)
-        fprintf(stderr, "[NODE-WALK-12820] count=%ld ecx=0x%08X\n", n, g_ecx);
+        DAH2_TRACE_FPRINTF(stderr, "[NODE-WALK-12820] count=%ld ecx=0x%08X\n", n, g_ecx);
 
     g_esp -= 4; *manual_mem32(g_esp) = ebp;     /* PUSH32(esp, ebp) */
     g_esp -= 4; *manual_mem32(g_esp) = g_esi;   /* PUSH32(esp, esi) */
@@ -1308,7 +1309,7 @@ static void traced_sub_000C4C80(void)
 {
     long n = InterlockedIncrement(&g_call_count_C4C80);
     if (n <= 20 || (n % 1000) == 0)
-        fprintf(stderr, "[CALL-C4C80] count=%ld ecx=0x%08X retaddr=0x%08X\n",
+        DAH2_TRACE_FPRINTF(stderr, "[CALL-C4C80] count=%ld ecx=0x%08X retaddr=0x%08X\n",
                 n, g_ecx, *manual_mem32(g_esp));
     sub_000C4C80();
 }
@@ -1354,7 +1355,7 @@ void sub_0012B5A0(void)
         uint32_t state = *manual_mem32(g_esi + 0x128);
         long n = InterlockedIncrement(&g_call_count_B5A0);
         if (n <= 30 || (n % 500) == 0)
-            fprintf(stderr, "[CALL-B5A0] count=%ld obj=0x%08X state=0x%08X\n", n, g_esi, state);
+            DAH2_TRACE_FPRINTF(stderr, "[CALL-B5A0] count=%ld obj=0x%08X state=0x%08X\n", n, g_esi, state);
         if (state != 1) goto ret_early;
     }
 
@@ -1536,7 +1537,7 @@ void sub_0012B710(void)
     {
         long n = InterlockedIncrement(&g_call_count_B710);
         if (n <= 30 || (n % 500) == 0)
-            fprintf(stderr, "[CALL-B710] count=%ld obj=0x%08X state=0x%08X\n", n, g_esi, g_eax);
+            DAH2_TRACE_FPRINTF(stderr, "[CALL-B710] count=%ld obj=0x%08X state=0x%08X\n", n, g_esi, g_eax);
     }
 
     if (g_eax == g_edi) goto ret_early_b710; /* state == 3: nothing to do */
@@ -1742,10 +1743,10 @@ extern void sub_00115120(void);
 extern void sub_001152B0(void);
 
 #define F7C50_CALL(name, return_va) do { \
-    fprintf(stderr, "[F7C50] -> " #name " ebx=0x%08X esi=0x%08X edi=0x%08X esp=0x%08X\n", g_ebx, g_esi, g_edi, g_esp); \
+    DAH2_TRACE_FPRINTF(stderr, "[F7C50] -> " #name " ebx=0x%08X esi=0x%08X edi=0x%08X esp=0x%08X\n", g_ebx, g_esi, g_edi, g_esp); \
     g_esp -= 4; *manual_mem32(g_esp) = (return_va); \
     name(); \
-    fprintf(stderr, "[F7C50] <- " #name " ok ebx=0x%08X esi=0x%08X edi=0x%08X esp=0x%08X\n", g_ebx, g_esi, g_edi, g_esp); \
+    DAH2_TRACE_FPRINTF(stderr, "[F7C50] <- " #name " ok ebx=0x%08X esi=0x%08X edi=0x%08X esp=0x%08X\n", g_ebx, g_esi, g_edi, g_esp); \
 } while (0)
 
 /* TEMP: full /FORCE:MULTIPLE transplant of sub_0012C9A0, the function
@@ -1776,7 +1777,7 @@ void sub_0012C9A0(void)
     g_esp -= 4; *manual_mem32(g_esp) = g_esi;   /* PUSH32(esp, esi) */
     esi = *manual_mem32(ebx);
 
-    fprintf(stderr, "[C9A0] ENTER count=%ld ecx=0x%08X ebx(sentinel)=0x%08X esi(head)=0x%08X\n",
+    DAH2_TRACE_FPRINTF(stderr, "[C9A0] ENTER count=%ld ecx=0x%08X ebx(sentinel)=0x%08X esi(head)=0x%08X\n",
             n, g_ecx, ebx, esi);
 
     if (esi != ebx) {
@@ -1787,19 +1788,19 @@ void sub_0012C9A0(void)
         do {
             iter++;
             if (iter <= 30 || (iter % 1000) == 0)
-                fprintf(stderr, "[C9A0] iter=%ld esi=0x%08X ebx=0x%08X\n", iter, esi, ebx);
+                DAH2_TRACE_FPRINTF(stderr, "[C9A0] iter=%ld esi=0x%08X ebx=0x%08X\n", iter, esi, ebx);
             if (iter == 200000) {
-                fprintf(stderr, "[C9A0] *** RUNAWAY: 200000 iterations, aborting instrumentation loop print spam ***\n");
+                DAH2_TRACE_FPRINTF(stderr, "[C9A0] *** RUNAWAY: 200000 iterations, aborting instrumentation loop print spam ***\n");
             }
 
             /* loc_0012C9B0 */
             g_eax = *manual_mem32(g_esp + 0x14);
             g_ecx = *manual_mem32(esi + 8);
             g_esp -= 4; *manual_mem32(g_esp) = g_eax;
-            fprintf(stderr, "[C9A0] -> sub_0012B870 esi=0x%08X\n", esi);
+            DAH2_TRACE_FPRINTF(stderr, "[C9A0] -> sub_0012B870 esi=0x%08X\n", esi);
             g_esp -= 4; *manual_mem32(g_esp) = 0x0012C9BDu;
             sub_0012B870();
-            fprintf(stderr, "[C9A0] <- sub_0012B870 ok al=0x%02X\n", g_eax & 0xFF);
+            DAH2_TRACE_FPRINTF(stderr, "[C9A0] <- sub_0012B870 ok al=0x%02X\n", g_eax & 0xFF);
 
             /* loc_0012C9BD */
             if ((g_eax & 0xFF) != 0) {
@@ -1825,7 +1826,7 @@ void sub_0012C9A0(void)
                     g_esp -= 4; *manual_mem32(g_esp) = 1;
                     uint32_t _icall_target = *manual_mem32(g_edx);
                     g_esp -= 4; *manual_mem32(g_esp) = 0x0012C9EBu;
-                    fprintf(stderr, "[C9A0] -> ICALL target=0x%08X\n", _icall_target);
+                    DAH2_TRACE_FPRINTF(stderr, "[C9A0] -> ICALL target=0x%08X\n", _icall_target);
                     if (_icall_target >= 0x00400000 && _icall_target < 0xFE000000) {
                         g_esp = _icall_esp; g_eax = 0;
                     } else {
@@ -1837,7 +1838,7 @@ void sub_0012C9A0(void)
                         else { recomp_icall_fail_log(_icall_target); g_esp = _icall_esp; g_eax = 0; }
                         g_esi = protect_esi; g_edi = protect_edi; g_ebx = protect_ebx;
                     }
-                    fprintf(stderr, "[C9A0] <- ICALL ok\n");
+                    DAH2_TRACE_FPRINTF(stderr, "[C9A0] <- ICALL ok\n");
                 }
                 /* loc_0012C9EB */
                 esi = edi;
@@ -1853,7 +1854,7 @@ void sub_0012C9A0(void)
     /* loc_0012C9F3 */
     g_esi = *manual_mem32(g_esp); g_esp += 4;  /* POP32(esp, esi) */
     g_ebx = *manual_mem32(g_esp); g_esp += 4;  /* POP32(esp, ebx) */
-    fprintf(stderr, "[C9A0] EXIT count=%ld total_iters=%ld\n", n, iter);
+    DAH2_TRACE_FPRINTF(stderr, "[C9A0] EXIT count=%ld total_iters=%ld\n", n, iter);
     g_esp += 8; return; /* 0x0012C9F5: ret 4 (return address + argument) */
 }
 
@@ -1861,7 +1862,7 @@ void sub_000F7C50(void)
 {
     uint32_t ebp = g_seh_ebp; /* fpo_leaf: inherit caller's frame */
 
-    fprintf(stderr, "[F7C50] ENTER ecx=0x%08X\n", g_ecx);
+    DAH2_TRACE_FPRINTF(stderr, "[F7C50] ENTER ecx=0x%08X\n", g_ecx);
 
     g_esp -= 0xC;
     g_eax = *manual_mem32(g_esp + 0x10);
@@ -1942,7 +1943,7 @@ void sub_000F7C50(void)
                 uint32_t this_obj = ebp;
                 uint32_t _icall_target = *manual_mem32(g_eax + 8);
                 g_esp -= 4; *manual_mem32(g_esp) = 0x000F7CEEu;
-                fprintf(stderr, "[F7C50] -> ICALL target=0x%08X\n", _icall_target);
+                DAH2_TRACE_FPRINTF(stderr, "[F7C50] -> ICALL target=0x%08X\n", _icall_target);
                 if (_icall_target >= 0x00400000 && _icall_target < 0xFE000000) {
                     g_esp = _icall_esp; g_eax = 0;
                 } else {
@@ -1955,7 +1956,7 @@ void sub_000F7C50(void)
                     else { recomp_icall_fail_log(_icall_target); g_esp = _icall_esp; g_eax = 0; }
                     g_esi = protect_esi; g_edi = protect_edi; g_ebx = protect_ebx;
                 }
-                fprintf(stderr, "[F7C50] <- ICALL ok\n");
+                DAH2_TRACE_FPRINTF(stderr, "[F7C50] <- ICALL ok\n");
             }
 
             /* loc_000F7CEE */
@@ -2027,7 +2028,7 @@ void sub_000F7C50(void)
 
 loc_000F7D5C_b:
     /* loc_000F7D5C: convergence point of both branches */
-    fprintf(stderr, "[F7C50] pre-C9A0 g_ebx=0x%08X (expect 0x812142D0-ish 'this'), MEM32(ebx+0x10)=0x%08X\n",
+    DAH2_TRACE_FPRINTF(stderr, "[F7C50] pre-C9A0 g_ebx=0x%08X (expect 0x812142D0-ish 'this'), MEM32(ebx+0x10)=0x%08X\n",
             g_ebx, *manual_mem32(g_ebx + 0x10));
     g_ecx = *manual_mem32(g_ebx + 0x10);
     g_esp -= 4; *manual_mem32(g_esp) = g_edi;
@@ -2095,7 +2096,7 @@ loc_000F7D5C_b:
     g_esi = *manual_mem32(g_esp); g_esp += 4;   /* POP32(esp, esi) */
     g_ebx = *manual_mem32(g_esp); g_esp += 4;   /* POP32(esp, ebx) */
     g_esp = g_esp + 0xC;
-    fprintf(stderr, "[F7C50] EXIT ok\n");
+    DAH2_TRACE_FPRINTF(stderr, "[F7C50] EXIT ok\n");
     g_esp += 8; return; /* ret 4 */
 }
 
@@ -2120,10 +2121,10 @@ static void traced_sub_000F2720(void)
     uint32_t pre_offset = *manual_mem32(0x2C9CD0);
     uint32_t arena_base = *manual_mem32(0x2C9CC8);
     uint32_t esi_guess = pre_offset + arena_base;
-    fprintf(stderr, "[CALL-F2720] count=%ld ecx=0x%08X pre_count_at_esi=0x%08X (esi_guess=0x%08X)\n",
+    DAH2_TRACE_FPRINTF(stderr, "[CALL-F2720] count=%ld ecx=0x%08X pre_count_at_esi=0x%08X (esi_guess=0x%08X)\n",
             n, g_ecx, *manual_mem32(esi_guess), esi_guess);
     sub_000F2720();
-    fprintf(stderr, "[CALL-F2720] count=%ld RETURNED\n", n);
+    DAH2_TRACE_FPRINTF(stderr, "[CALL-F2720] count=%ld RETURNED\n", n);
 }
 
 /* TEMP: full /FORCE:MULTIPLE transplant of sub_0015E740, reached on the
@@ -2207,10 +2208,10 @@ static __forceinline float *manual_memf(uint32_t va) { return (float *)((uintptr
 extern int g_manual_transplant_icall_trace;
 #define RECOMP_ICALL_SAFE(target, saved_esp) do { \
     if (g_manual_transplant_icall_trace) \
-        fprintf(stderr, "[TRANSPLANT-ICALL] line=%d target=0x%08X ecx=0x%08X\n", __LINE__, (target), g_ecx); \
+        DAH2_TRACE_FPRINTF(stderr, "[TRANSPLANT-ICALL] line=%d target=0x%08X ecx=0x%08X\n", __LINE__, (target), g_ecx); \
     if ((target) >= 0x00400000u && (target) < 0xFE000000u) { \
         if (g_manual_transplant_icall_trace) \
-            fprintf(stderr, "[TRANSPLANT-ICALL] line=%d GARBAGE, skipped\n", __LINE__); \
+            DAH2_TRACE_FPRINTF(stderr, "[TRANSPLANT-ICALL] line=%d GARBAGE, skipped\n", __LINE__); \
         g_esp = (saved_esp); g_eax = 0; \
     } else { \
         uint32_t _pe = g_esi, _pd = g_edi, _pb = g_ebx; \
@@ -2221,7 +2222,7 @@ extern int g_manual_transplant_icall_trace;
         else { recomp_icall_fail_log(target); g_esp = (saved_esp); g_eax = 0; } \
         g_esi = _pe; g_edi = _pd; g_ebx = _pb; \
         if (g_manual_transplant_icall_trace) \
-            fprintf(stderr, "[TRANSPLANT-ICALL] line=%d returned ok\n", __LINE__); \
+            DAH2_TRACE_FPRINTF(stderr, "[TRANSPLANT-ICALL] line=%d returned ok\n", __LINE__); \
     } \
 } while (0)
 
@@ -2897,7 +2898,7 @@ loc_0015EB7B: ;
         static volatile long s_skip_count;
         long n = InterlockedIncrement(&s_skip_count);
         if (n <= 20 || (n % 500) == 0)
-            fprintf(stderr, "[0015E740] SKIP: garbage vtable 0x%08X on object 0x%08X (count=%ld)\n",
+            DAH2_TRACE_FPRINTF(stderr, "[0015E740] SKIP: garbage vtable 0x%08X on object 0x%08X (count=%ld)\n",
                     edx, esi, n);
         goto loc_0015EC88;
     }
@@ -2922,7 +2923,7 @@ loc_0015EB83: ;
         static volatile long s_skip_count2;
         long n = InterlockedIncrement(&s_skip_count2);
         if (n <= 20 || (n % 500) == 0)
-            fprintf(stderr, "[0015E740] SKIP2: bad object 0x%08X from vtable+0x58 on 0x%08X (count=%ld)\n",
+            DAH2_TRACE_FPRINTF(stderr, "[0015E740] SKIP2: bad object 0x%08X from vtable+0x58 on 0x%08X (count=%ld)\n",
                     eax, esi, n);
         goto loc_0015EC88;
     }
@@ -2938,7 +2939,7 @@ loc_0015EB83: ;
         static volatile long s_skip_count3;
         long n = InterlockedIncrement(&s_skip_count3);
         if (n <= 20 || (n % 500) == 0)
-            fprintf(stderr, "[0015E740] SKIP3: bad sub-object 0x%08X (ecx+0x90) on 0x%08X (count=%ld)\n",
+            DAH2_TRACE_FPRINTF(stderr, "[0015E740] SKIP3: bad sub-object 0x%08X (ecx+0x90) on 0x%08X (count=%ld)\n",
                     eax, esi, n);
         goto loc_0015EC88;
     }
@@ -3033,7 +3034,7 @@ void sub_0015C170(void)
             static volatile long s_skip_count;
             long n = InterlockedIncrement(&s_skip_count);
             if (n <= 20 || (n % 500) == 0)
-                fprintf(stderr, "[0015C170] SKIP: garbage vtable 0x%08X on object 0x%08X (count=%ld)\n",
+                DAH2_TRACE_FPRINTF(stderr, "[0015C170] SKIP: garbage vtable 0x%08X on object 0x%08X (count=%ld)\n",
                         vtbl, esi, n);
             POP32(esp, edi);
             POP32(esp, esi);
@@ -3402,31 +3403,31 @@ void sub_001A7C80(void)
     PUSH32(esp, 1);
     esi = ecx;
     MEM8(esp + 0xC) = 0;
-    fprintf(stderr, "[001A7C80] pre sub_001AF400 esi=0x%08X\n", esi);
+    DAH2_TRACE_FPRINTF(stderr, "[001A7C80] pre sub_001AF400 esi=0x%08X\n", esi);
     PUSH32(esp, 0x001A7C95u); sub_001AF400();
-    fprintf(stderr, "[001A7C80] post sub_001AF400 esi=0x%08X eax=0x%08X\n", esi, eax);
+    DAH2_TRACE_FPRINTF(stderr, "[001A7C80] post sub_001AF400 esi=0x%08X eax=0x%08X\n", esi, eax);
 
 loc_001A7C95: ;
     edx = esp + 8;
     ecx = eax;
-    fprintf(stderr, "[001A7C80] pre sub_0013E8A0 esi=0x%08X ecx=0x%08X\n", esi, ecx);
+    DAH2_TRACE_FPRINTF(stderr, "[001A7C80] pre sub_0013E8A0 esi=0x%08X ecx=0x%08X\n", esi, ecx);
     PUSH32(esp, 0x001A7CA0u); sub_0013E8A0();
-    fprintf(stderr, "[001A7C80] post sub_0013E8A0 esi=0x%08X eax=0x%08X\n", esi, eax);
+    DAH2_TRACE_FPRINTF(stderr, "[001A7C80] post sub_0013E8A0 esi=0x%08X eax=0x%08X\n", esi, eax);
 
 loc_001A7CA0: ;
     ecx = esp + 8;
-    fprintf(stderr, "[001A7C80] pre sub_001A7920 esi=0x%08X ecx=0x%08X\n", esi, ecx);
+    DAH2_TRACE_FPRINTF(stderr, "[001A7C80] pre sub_001A7920 esi=0x%08X ecx=0x%08X\n", esi, ecx);
     PUSH32(esp, 0x001A7CA9u); sub_001A7920();
-    fprintf(stderr, "[001A7C80] post sub_001A7920 esi=0x%08X eax=0x%08X\n", esi, eax);
+    DAH2_TRACE_FPRINTF(stderr, "[001A7C80] post sub_001A7920 esi=0x%08X eax=0x%08X\n", esi, eax);
 
 loc_001A7CA9: ;
     MEM8(esp + 4) = LO8(eax);
     eax = MEM32(esp + 4);
     PUSH32(esp, eax);
     ecx = esi;
-    fprintf(stderr, "[001A7C80] pre sub_001AEEA0 esi=0x%08X ecx=0x%08X eax=0x%08X\n", esi, ecx, eax);
+    DAH2_TRACE_FPRINTF(stderr, "[001A7C80] pre sub_001AEEA0 esi=0x%08X ecx=0x%08X eax=0x%08X\n", esi, ecx, eax);
     PUSH32(esp, 0x001A7CB9u); sub_001AEEA0();
-    fprintf(stderr, "[001A7C80] post sub_001AEEA0 esi=0x%08X eax=0x%08X\n", esi, eax);
+    DAH2_TRACE_FPRINTF(stderr, "[001A7C80] post sub_001AEEA0 esi=0x%08X eax=0x%08X\n", esi, eax);
 
 loc_001A7CB9: ;
     eax = 1;
@@ -3460,7 +3461,7 @@ void sub_00252410(void)
     PUSH32(esp, eax);
     eax = MEM32(esp + 0x28);
     if (_trace)
-        fprintf(stderr, "[00252410] #%ld ENTER format_param(MEM32(esp+0x28))=0x%08X\n", _n, eax);
+        DAH2_TRACE_FPRINTF(stderr, "[00252410] #%ld ENTER format_param(MEM32(esp+0x28))=0x%08X\n", _n, eax);
     SET_LO8(edx, (CMP_EQ(eax, 4)) ? 1 : 0);
     ecx = esp + 0x28;
     PUSH32(esp, ecx);
@@ -3485,7 +3486,7 @@ void sub_00252410(void)
 loc_00252452: ;
     edi = eax;
     if (_trace)
-        fprintf(stderr, "[00252410] #%ld post sub_002566D0 edi=0x%08X (=%u)\n", _n, edi, edi);
+        DAH2_TRACE_FPRINTF(stderr, "[00252410] #%ld post sub_002566D0 edi=0x%08X (=%u)\n", _n, edi, edi);
     if (TEST_Z(MEM32(esp + 0x1C), 0x10000)) {
         /* fallthrough */
     } else {
@@ -3502,13 +3503,13 @@ loc_0025246F: ;
     esi = eax;
     if (esi != 0) {
         if (_trace)
-            fprintf(stderr, "[00252410] #%ld pre 2nd sub_000FB0A1 edi=0x%08X\n", _n, edi);
+            DAH2_TRACE_FPRINTF(stderr, "[00252410] #%ld pre 2nd sub_000FB0A1 edi=0x%08X\n", _n, edi);
         PUSH32(esp, 0xB7800000u);
         PUSH32(esp, edi);
         PUSH32(esp, 0x00252480u);
         sub_000FB0A1();
         if (_trace)
-            fprintf(stderr, "[00252410] #%ld post 2nd sub_000FB0A1 eax=0x%08X\n", _n, eax);
+            DAH2_TRACE_FPRINTF(stderr, "[00252410] #%ld post 2nd sub_000FB0A1 eax=0x%08X\n", _n, eax);
 
     loc_00252480: ;
         if (eax != 0) {
@@ -3562,7 +3563,7 @@ void sub_000FCB03(void)
     eax = MEM32(ebp + 0xC);
     ecx = MEM32(ebp + 8);
     if (_trace)
-        fprintf(stderr, "[000FCB03] #%ld ENTER arg@ebp+0xC=0x%08X arg@ebp+8=0x%08X arg@ebp+0x10=0x%08X arg@ebp+0x14=0x%08X\n",
+        DAH2_TRACE_FPRINTF(stderr, "[000FCB03] #%ld ENTER arg@ebp+0xC=0x%08X arg@ebp+8=0x%08X arg@ebp+0x10=0x%08X arg@ebp+0x14=0x%08X\n",
                 _n, eax, ecx, MEM32(ebp + 0x10), MEM32(ebp + 0x14));
     if (eax == 0xFFFFFFFFu) {
         edx = 0;
@@ -3585,7 +3586,7 @@ void sub_000FCB03(void)
         RECOMP_ICALL_SAFE(_icall_target, _icall_esp);
     }
     if (_trace)
-        fprintf(stderr, "[000FCB03] #%ld post-icall eax=0x%08X\n", _n, eax);
+        DAH2_TRACE_FPRINTF(stderr, "[000FCB03] #%ld post-icall eax=0x%08X\n", _n, eax);
     esi = eax;
     if (esi == 0) {
         PUSH32(esp, 8);
@@ -3625,7 +3626,7 @@ loc_00139800: ;
     eax = edi + esi;
     PUSH32(esp, eax);
     if (_iter <= 40)
-        fprintf(stderr, "[001397F0] iter=%ld edi=0x%08X esi=0x%08X eax(size)=0x%08X\n", _iter, edi, esi, eax);
+        DAH2_TRACE_FPRINTF(stderr, "[001397F0] iter=%ld edi=0x%08X esi=0x%08X eax(size)=0x%08X\n", _iter, edi, esi, eax);
     PUSH32(esp, 0x00139814u);
     sub_000FCB03();
 
@@ -3665,29 +3666,29 @@ void sub_001A7920(void)
     uint32_t esp_before_push_esi = esp;
     PUSH32(esp, esi);
     esi = ecx;
-    fprintf(stderr, "[001A7920] ENTER MEM32(0x31D9BC)=%u esi=0x%08X esp_before=0x%08X esp_after_push=0x%08X\n",
+    DAH2_TRACE_FPRINTF(stderr, "[001A7920] ENTER MEM32(0x31D9BC)=%u esi=0x%08X esp_before=0x%08X esp_after_push=0x%08X\n",
             MEM32(0x31D9BC), esi, esp_before_push_esi, esp);
 
     if (MEM32(0x31D9BC) != 1) {
-        fprintf(stderr, "[001A7920] pre sub_001A7FF0 esp=0x%08X\n", esp);
+        DAH2_TRACE_FPRINTF(stderr, "[001A7920] pre sub_001A7FF0 esp=0x%08X\n", esp);
         PUSH32(esp, 0x001A7933u); sub_001A7FF0();
-        fprintf(stderr, "[001A7920] post sub_001A7FF0 esp=0x%08X eax=0x%08X\n", esp, eax);
+        DAH2_TRACE_FPRINTF(stderr, "[001A7920] post sub_001A7FF0 esp=0x%08X eax=0x%08X\n", esp, eax);
     } else {
-        fprintf(stderr, "[001A7920] pre sub_001A86E0 esp=0x%08X\n", esp);
+        DAH2_TRACE_FPRINTF(stderr, "[001A7920] pre sub_001A86E0 esp=0x%08X\n", esp);
         PUSH32(esp, 0x001A7931u); sub_001A86E0();
-        fprintf(stderr, "[001A7920] post sub_001A86E0 esp=0x%08X eax=0x%08X\n", esp, eax);
+        DAH2_TRACE_FPRINTF(stderr, "[001A7920] post sub_001A86E0 esp=0x%08X eax=0x%08X\n", esp, eax);
     }
 
     if (LO8(eax) == 0) {
         ecx = esi;
-        fprintf(stderr, "[001A7920] pre sub_001A84F0 esp=0x%08X ecx=0x%08X\n", esp, ecx);
+        DAH2_TRACE_FPRINTF(stderr, "[001A7920] pre sub_001A84F0 esp=0x%08X ecx=0x%08X\n", esp, ecx);
         PUSH32(esp, 0x001A7943u); sub_001A84F0();
-        fprintf(stderr, "[001A7920] post sub_001A84F0 esp=0x%08X eax=0x%08X\n", esp, eax);
+        DAH2_TRACE_FPRINTF(stderr, "[001A7920] post sub_001A84F0 esp=0x%08X eax=0x%08X\n", esp, eax);
         if (LO8(eax) == 0) {
             SET_LO8(eax, 0);
-            fprintf(stderr, "[001A7920] EXIT path A esp_before_pop=0x%08X\n", esp);
+            DAH2_TRACE_FPRINTF(stderr, "[001A7920] EXIT path A esp_before_pop=0x%08X\n", esp);
             POP32(esp, esi);
-            fprintf(stderr, "[001A7920] EXIT path A esi_popped=0x%08X esp_after=0x%08X\n", esi, esp);
+            DAH2_TRACE_FPRINTF(stderr, "[001A7920] EXIT path A esi_popped=0x%08X esp_after=0x%08X\n", esi, esp);
             esp += 4; return;
         }
     }
@@ -3695,9 +3696,9 @@ void sub_001A7920(void)
     MEM8(0x31D9B8) = MEM8(0x31D9B8) | 1;
     MEM32(0x31D9BC) = 2;
     SET_LO8(eax, 1);
-    fprintf(stderr, "[001A7920] EXIT path B esp_before_pop=0x%08X\n", esp);
+    DAH2_TRACE_FPRINTF(stderr, "[001A7920] EXIT path B esp_before_pop=0x%08X\n", esp);
     POP32(esp, esi);
-    fprintf(stderr, "[001A7920] EXIT path B esi_popped=0x%08X esp_after=0x%08X\n", esi, esp);
+    DAH2_TRACE_FPRINTF(stderr, "[001A7920] EXIT path B esi_popped=0x%08X esp_after=0x%08X\n", esi, esp);
     esp += 4; return;
 }
 
@@ -3807,7 +3808,7 @@ void recomp_icall_fail_log(uint32_t va)
     total_n = ++s_total_log_count;
     if (total_n > 20 && (total_n % 2000) != 0)
         return;
-    fprintf(stderr, "[ICALL] Failed to resolve VA 0x%08X (total calls: %llu) caller_rva=0x%llX\n",
+    DAH2_TRACE_FPRINTF(stderr, "[ICALL] Failed to resolve VA 0x%08X (total calls: %llu) caller_rva=0x%llX\n",
             va, (unsigned long long)g_icall_count,
             (unsigned long long)((uintptr_t)_ReturnAddress() - (uintptr_t)GetModuleHandleA(NULL)));
 
@@ -3815,30 +3816,30 @@ void recomp_icall_fail_log(uint32_t va)
          (va == 0x002AE888u && site_debug_count <= 5)) &&
         g_esp >= 0x10000 && g_esp < 0x04000000) {
         const uint32_t *stack = (const uint32_t *)((uintptr_t)g_esp + g_xbox_mem_offset);
-        fprintf(stderr,
+        DAH2_TRACE_FPRINTF(stderr,
                 "  site/stack esp=%08X: %08X %08X %08X %08X %08X %08X eax=%08X ecx=%08X edx=%08X\n",
                 g_esp, stack[0], stack[1], stack[2], stack[3], stack[4], stack[5],
                 g_eax, g_ecx, g_edx);
-        fprintf(stderr, "  regs esi=%08X edi=%08X ebx=%08X\n", g_esi, g_edi, g_ebx);
+        DAH2_TRACE_FPRINTF(stderr, "  regs esi=%08X edi=%08X ebx=%08X\n", g_esi, g_edi, g_ebx);
         if (g_edi >= 0x10000u && g_edi < 0x38000000u) {
             const uint32_t *obj = (const uint32_t *)((uintptr_t)g_edi + g_xbox_mem_offset);
-            fprintf(stderr,
+            DAH2_TRACE_FPRINTF(stderr,
                     "  edi-obj[+0x58 count]=%08X [+0x5C]=%08X [+0x60 base]=%08X [+0x64]=%08X\n",
                     obj[0x58/4], obj[0x5C/4], obj[0x60/4], obj[0x64/4]);
         }
         if (g_esi >= 0x10000u && g_esi < 0x38000000u) {
             const uint32_t *arr = (const uint32_t *)((uintptr_t)g_esi + g_xbox_mem_offset);
-            fprintf(stderr, "  esi-array[0..3]=%08X %08X %08X %08X\n",
+            DAH2_TRACE_FPRINTF(stderr, "  esi-array[0..3]=%08X %08X %08X %08X\n",
                     arr[0], arr[1], arr[2], arr[3]);
         }
     }
 
     /* Dump last 16 call targets from the ring buffer */
-    fprintf(stderr, "  Recent ICALL targets:\n");
+    DAH2_TRACE_FPRINTF(stderr, "  Recent ICALL targets:\n");
     for (int i = 0; i < 16; i++) {
         int idx = (g_icall_trace_idx - 16 + i) & 15;
         if (g_icall_trace[idx])
-            fprintf(stderr, "    [%2d] 0x%08X\n", i, g_icall_trace[idx]);
+            DAH2_TRACE_FPRINTF(stderr, "    [%2d] 0x%08X\n", i, g_icall_trace[idx]);
     }
     fflush(stderr);
 }

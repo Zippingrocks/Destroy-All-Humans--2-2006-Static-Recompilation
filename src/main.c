@@ -39,6 +39,7 @@
 #include <stdint.h>
 #include <intrin.h>
 #include "boot_window.h"
+#include "trace_control.h"
 
 /* TEMP diagnostic: a process-wide hang was observed after truncated-
  * function fixes got the frame loop presenting a handful of times (see
@@ -399,13 +400,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
      * so crash diagnostics are never lost. */
     setvbuf(stdout, NULL, _IONBF, 0);
     setvbuf(stderr, NULL, _IOFBF, 1 << 20);  /* 1 MB fully-buffered */
-    /* The generated bring-up sources still contain extensive call-by-call
-     * diagnostics.  Leaving those enabled makes Bink decoding fall behind
-     * its retail clock badly enough that the game deliberately skips every
-     * movie-buffer presentation.  Keep the playable path quiet by default;
-     * full legacy tracing remains available explicitly for investigations. */
-    if (getenv("DAH2_VERBOSE_TRACE") == NULL ||
-        getenv("DAH2_QUIET_TRACE") != NULL) {
+    dah2_trace_initialize();
+    /* Generated and manual bring-up diagnostics are verbose-only. Keeping
+     * their formatting off the playable path prevents Bink decode from
+     * falling behind its retail clock and skipping movie presentation. */
+    if (!g_dah2_verbose_trace) {
         FILE *quiet_stderr = NULL;
         freopen_s(&quiet_stderr, "NUL", "w", stderr);
     }

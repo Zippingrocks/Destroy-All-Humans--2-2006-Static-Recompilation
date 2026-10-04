@@ -62,6 +62,7 @@
  * CMakeLists) -- MSVC's C4013 was emitted and discarded. Same failure as the
  * missing stdlib.h in kernel_bridge.c, in a hotter path. */
 #include <math.h>
+#include "trace_control.h"
 
 /* MSVC's __forceinline -> gcc/clang equivalent on POSIX. */
 #if !defined(_MSC_VER) && !defined(__forceinline)
@@ -758,6 +759,7 @@ void recomp_icall_watch_log(uint32_t this_ptr, uint32_t target, uint32_t va_from
  * ================================================================ */
 
 #ifdef RECOMP_GENERATED_CODE
+#define fprintf(stream, ...) DAH2_TRACE_FPRINTF((stream), __VA_ARGS__)
 #define eax g_eax
 #define ecx g_ecx
 #define edx g_edx

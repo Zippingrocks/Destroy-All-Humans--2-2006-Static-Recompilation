@@ -56,6 +56,7 @@ set(GAME_SOURCES
     src/guest_nv2a_bridge.c
     src/parity_timing.c
     src/recomp_manual.c
+    src/trace_control.c
     # Add game-specific sources here, e.g.:
     # src/asset_loader.c
     # src/custom_renderer.c
@@ -71,6 +72,7 @@ add_executable(${PROJECT_NAME} WIN32
     ${GAME_SOURCES}
     ${RECOMP_GEN_SOURCES}
 )
+
 
 # Link against the xboxrecomp umbrella target (all 6 runtime libraries)
 target_link_libraries(${PROJECT_NAME} PRIVATE xboxrecomp)

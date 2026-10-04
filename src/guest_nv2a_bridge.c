@@ -4,6 +4,7 @@
 #include "d3d8_xbox.h"
 #include "nv2a_pgraph_d3d11.h"
 #include "recomp/recomp_types.h"
+#include "trace_control.h"
 #include "xbox_memory_layout.h"
 
 #include <stdio.h>
@@ -55,7 +56,7 @@ void dah2_guest_gpu_note_pb_base(uint32_t guest_device, uint32_t base_put)
 {
     /* This checkpoint is after initialization has already emitted commands.
      * Keep its diagnostic ABI, but never use this PUT as the allocation base. */
-    fprintf(stderr, "[DAH2-GPU] post-init push buffer PUT: dev=0x%08X put=0x%08X\n",
+    DAH2_TRACE_FPRINTF(stderr, "[DAH2-GPU] post-init push buffer PUT: dev=0x%08X put=0x%08X\n",
             guest_device, base_put);
 }
 
@@ -116,7 +117,7 @@ static int dah2_read_guest_ring(uint32_t guest_device,
         long _n = InterlockedIncrement(&s_ring_diag_count);
         int _trace = (_n <= 20 || (_n % 1000) == 0);
         if (!dah2_guest_span_valid(guest_device, 0x2Cu)) {
-            if (_trace) fprintf(stderr, "[DAH2-RING] dev span invalid dev=0x%08X (#%ld)\n", guest_device, _n);
+            if (_trace) DAH2_TRACE_FPRINTF(stderr, "[DAH2-RING] dev span invalid dev=0x%08X (#%ld)\n", guest_device, _n);
             return 0;
         }
 
@@ -127,15 +128,15 @@ static int dah2_read_guest_ring(uint32_t guest_device,
         start_raw = MEM32(guest_device + 0x24);
         end_raw = MEM32(guest_device + 0x28);
         if (_trace)
-            fprintf(stderr, "[DAH2-RING] dev=0x%08X start_raw=0x%08X end_raw=0x%08X (#%ld)\n",
+            DAH2_TRACE_FPRINTF(stderr, "[DAH2-RING] dev=0x%08X start_raw=0x%08X end_raw=0x%08X (#%ld)\n",
                     guest_device, start_raw, end_raw, _n);
         if ((start_raw & 3u) != 0 || (end_raw & 3u) != 0) {
-            if (_trace) fprintf(stderr, "[DAH2-RING] misaligned (#%ld)\n", _n);
+            if (_trace) DAH2_TRACE_FPRINTF(stderr, "[DAH2-RING] misaligned (#%ld)\n", _n);
             return 0;
         }
 
         if (start_raw == 0 || end_raw <= start_raw) {
-            if (_trace) fprintf(stderr, "[DAH2-RING] end<=start (#%ld)\n", _n);
+            if (_trace) DAH2_TRACE_FPRINTF(stderr, "[DAH2-RING] end<=start (#%ld)\n", _n);
             return 0;
         }
 
@@ -143,7 +144,7 @@ static int dah2_read_guest_ring(uint32_t guest_device,
         start = dah2_pb_address(start_raw);
         if (size > DAH2_PB_MAX_BYTES || start > 0x10000000u - size ||
             !dah2_guest_span_valid(start_raw, size)) {
-            if (_trace) fprintf(stderr, "[DAH2-RING] size/span check failed size=0x%08X start=0x%08X (#%ld)\n",
+            if (_trace) DAH2_TRACE_FPRINTF(stderr, "[DAH2-RING] size/span check failed size=0x%08X start=0x%08X (#%ld)\n",
                                  size, start, _n);
             return 0;
         }
@@ -186,7 +187,7 @@ static int dah2_guest_gpu_init_locked(void)
         static volatile long s_noninit_count;
         long _n = InterlockedIncrement(&s_noninit_count);
         if ((!hwnd || !IsWindow(hwnd)) && (_n <= 20 || (_n % 1000) == 0))
-            fprintf(stderr, "[DAH2-GPU] init skipped: hwnd=%p IsWindow=%d (call #%ld)\n",
+            DAH2_TRACE_FPRINTF(stderr, "[DAH2-GPU] init skipped: hwnd=%p IsWindow=%d (call #%ld)\n",
                     (void *)hwnd, hwnd ? IsWindow(hwnd) : -1, _n);
     }
     if (!hwnd || !IsWindow(hwnd))
@@ -204,14 +205,14 @@ static int dah2_guest_gpu_init_locked(void)
 
     d3d = xbox_Direct3DCreate8(0);
     if (!d3d) {
-        fprintf(stderr, "[DAH2-GPU] Host D3D8 factory creation failed\n");
+        DAH2_TRACE_FPRINTF(stderr, "[DAH2-GPU] Host D3D8 factory creation failed\n");
         g_bridge.renderer_failed = 1;
         return 0;
     }
 
     hr = d3d->lpVtbl->CreateDevice(d3d, 0, 0, hwnd, 0, &pp, &device);
     if (FAILED(hr) || !device) {
-        fprintf(stderr, "[DAH2-GPU] Host D3D8 device creation failed: 0x%08lX\n",
+        DAH2_TRACE_FPRINTF(stderr, "[DAH2-GPU] Host D3D8 device creation failed: 0x%08lX\n",
                 (unsigned long)hr);
         g_bridge.renderer_failed = 1;
         return 0;
@@ -223,7 +224,7 @@ static int dah2_guest_gpu_init_locked(void)
     pgraph_d3d11_set_guest_reader(dah2_guest_gpu_read_physical);
     g_bridge.renderer_ready = 1;
     dah2_boot_window_set_renderer_owned(TRUE);
-    fprintf(stderr,
+    DAH2_TRACE_FPRINTF(stderr,
             "[DAH2-GPU] Authentic guest renderer attached to boot HWND %p (640x480)\n",
             (void *)hwnd);
     return 1;
@@ -283,7 +284,7 @@ static void dah2_guest_gpu_commit_locked(uint32_t guest_device,
         g_bridge.cursor = start;
         g_bridge.return_cursor = 0;
         g_bridge.return_active = 0;
-        fprintf(stderr,
+        DAH2_TRACE_FPRINTF(stderr,
                 "[DAH2-GPU] Guest push buffer attached: dev=0x%08X cpu=0x%08X-0x%08X physical=0x%08X-0x%08X\n",
                 guest_device, cpu_start, cpu_end, start, end);
     }
@@ -439,7 +440,7 @@ parse_complete:
     }
 
     if (g_bridge.commits <= 8 || (g_bridge.commits % 600u) == 0) {
-        fprintf(stderr,
+        DAH2_TRACE_FPRINTF(stderr,
                 "[DAH2-GPU] Commit %llu: cursor=0x%08X put=0x%08X words=%u methods=%u malformed=%u\n",
                 (unsigned long long)g_bridge.commits, cursor, put,
                 commit_words, commit_methods, commit_malformed);
@@ -487,7 +488,7 @@ void dah2_guest_gpu_present(uint32_t guest_device)
      * function simply not being called anymore -- an UNTHROTTLED heartbeat
      * here settles it either way. See "frame presentation stalls" notes in
      * diagnostics/menu_recovery_2026-09-20.md. */
-    {
+    if (g_dah2_verbose_trace) {
         static volatile long s_heartbeat;
         static LARGE_INTEGER s_hb_freq, s_hb_start;
         LARGE_INTEGER now;
@@ -495,7 +496,7 @@ void dah2_guest_gpu_present(uint32_t guest_device)
         if (n == 1) { QueryPerformanceFrequency(&s_hb_freq); QueryPerformanceCounter(&s_hb_start); }
         QueryPerformanceCounter(&now);
         double t = (double)(now.QuadPart - s_hb_start.QuadPart) / (double)s_hb_freq.QuadPart;
-        fprintf(stderr, "[PRESENT-HEARTBEAT] call #%ld t=%.3fs guest_device=0x%08X\n", n, t, guest_device);
+        DAH2_TRACE_FPRINTF(stderr, "[PRESENT-HEARTBEAT] call #%ld t=%.3fs guest_device=0x%08X\n", n, t, guest_device);
     }
 
     dah2_frame_cap_30hz();
@@ -506,7 +507,7 @@ void dah2_guest_gpu_present(uint32_t guest_device)
         static volatile long s_span_invalid_count;
         long _n = InterlockedIncrement(&s_span_invalid_count);
         if (_n <= 20 || (_n % 1000) == 0)
-            fprintf(stderr, "[DAH2-GPU] present: guest_device span invalid (call #%ld)\n", _n);
+            DAH2_TRACE_FPRINTF(stderr, "[DAH2-GPU] present: guest_device span invalid (call #%ld)\n", _n);
         ReleaseSRWLockExclusive(&g_bridge.lock);
         return;
     }
@@ -517,7 +518,7 @@ void dah2_guest_gpu_present(uint32_t guest_device)
         static volatile long s_after_commit_count;
         long _n = InterlockedIncrement(&s_after_commit_count);
         if (_n <= 20 || (_n % 1000) == 0)
-            fprintf(stderr, "[DAH2-GPU] present: after commit, renderer_ready=%d renderer_failed=%d (call #%ld)\n",
+            DAH2_TRACE_FPRINTF(stderr, "[DAH2-GPU] present: after commit, renderer_ready=%d renderer_failed=%d (call #%ld)\n",
                     g_bridge.renderer_ready, g_bridge.renderer_failed, _n);
     }
     if (g_bridge.renderer_ready) {
@@ -529,7 +530,7 @@ void dah2_guest_gpu_present(uint32_t guest_device)
 
         if (g_bridge.presents <= 8 || (g_bridge.presents % 300u) == 0) {
             pgraph_d3d11_get_stats(&stats);
-            fprintf(stderr,
+            DAH2_TRACE_FPRINTF(stderr,
                     "[DAH2-GPU] Present %llu: translated frames=%u draws=%u verts=%u handled=%u ignored=%u clears=%u\n",
                     (unsigned long long)g_bridge.presents, stats.frames,
                     stats.draw_calls, stats.vertices_submitted,
