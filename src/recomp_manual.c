@@ -4445,6 +4445,42 @@ void sub_0028DDC0(void)
     g_esp += 8;
 }
 
+/* Retail 0x223180..0x223223. The generated extent stopped at 0x223203,
+ * before the last three constants, the four-vector copy, and the epilogue.
+ * That left 0x2F1F90..0x2F1FCC zero and leaked 0x50 guest-stack bytes. */
+void sub_00223180(void)
+{
+    g_esp -= 0x40;
+    g_eax = g_esp;
+    g_esp -= 4; *manual_mem32(g_esp) = g_eax;
+    g_ecx = g_esp + 0x14;
+    g_esp -= 4; *manual_mem32(g_esp) = g_ecx;
+    g_edx = g_esp + 0x28;
+    g_esp -= 4; *manual_mem32(g_esp) = g_edx;
+    g_eax = g_esp + 0x3C;
+    g_esp -= 4; *manual_mem32(g_esp) = g_eax;
+    g_ecx = 0x2F1F90;
+    *manual_mem32(g_esp + 0x10) = 0x41100000;
+    *manual_mem32(g_esp + 0x14) = 0x40A00000;
+    *manual_mem32(g_esp + 0x18) = 0x40C00000;
+    *manual_mem32(g_esp + 0x1C) = 0x40800000;
+    *manual_mem32(g_esp + 0x20) = 0x3F800000;
+    *manual_mem32(g_esp + 0x24) = 0x3FC00000;
+    *manual_mem32(g_esp + 0x28) = 0x3F000000;
+    *manual_mem32(g_esp + 0x2C) = 0x3F800000;
+    *manual_mem32(g_esp + 0x30) = 0x40400000;
+    *manual_mem32(g_esp + 0x34) = 0x40000000;
+    *manual_mem32(g_esp + 0x38) = 0x3FC00000;
+    *manual_mem32(g_esp + 0x3C) = 0x40000000;
+    *manual_mem32(g_esp + 0x40) = 0x41000000;
+    *manual_mem32(g_esp + 0x44) = 0x40A00000;
+    *manual_mem32(g_esp + 0x48) = 0x40400000;
+    *manual_mem32(g_esp + 0x4C) = 0x40000000;
+    g_esp -= 4; *manual_mem32(g_esp) = 0x00223220u;
+    sub_000425A0();
+    g_esp += 0x40;
+    g_esp += 4;
+}
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
 {
     /*

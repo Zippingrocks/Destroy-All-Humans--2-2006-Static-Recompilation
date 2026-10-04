@@ -168,6 +168,20 @@ if ($Mode -eq 'LaunchXemu') {
     $workingDirectory = $emulator
     $kind = 'xemu'
 } else {
+    if ($Environment.ContainsKey('DAH2_INPUT_SCRIPT') -and
+        [string]$Environment['DAH2_TEST_WINDOW_HIDDEN'] -ne '1') {
+        throw 'DAH2_INPUT_SCRIPT requires DAH2_TEST_WINDOW_HIDDEN=1 so scripted input cannot affect an ordinary player window.'
+    }
+    if ($Environment.ContainsKey('DAH2_CAPTURE_PRESENT')) {
+        $captureTargets = @(([string]$Environment['DAH2_CAPTURE_PRESENT']).Split(','))
+        $invalidCaptureTargets = @($captureTargets | Where-Object { $_ -notmatch '^[1-9][0-9]*$' })
+        if ($captureTargets.Count -lt 1 -or $captureTargets.Count -gt 3 -or $invalidCaptureTargets.Count) {
+            throw 'DAH2_CAPTURE_PRESENT accepts one to three comma-separated positive present numbers.'
+        }
+        if (($captureTargets | Select-Object -Unique).Count -ne $captureTargets.Count) {
+            throw 'DAH2_CAPTURE_PRESENT targets must be unique.'
+        }
+    }
     foreach ($directory in @($ExtractionDirectory, $GameSavesDirectory, $GameFilesDirectory)) {
         Assert-PlainPath $directory $true
     }
