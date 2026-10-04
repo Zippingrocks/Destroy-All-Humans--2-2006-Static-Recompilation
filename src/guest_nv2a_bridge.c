@@ -458,21 +458,24 @@ static void dah2_frame_cap_30hz(void)
     static LARGE_INTEGER s_freq;
     static LARGE_INTEGER s_next;
     LARGE_INTEGER now;
+    LONGLONG period;
 
     if (s_freq.QuadPart == 0) {
         QueryPerformanceFrequency(&s_freq);
         QueryPerformanceCounter(&s_next);
-        return;
     }
+    period = s_freq.QuadPart / 30;
+    s_next.QuadPart += period;
     QueryPerformanceCounter(&now);
     if (now.QuadPart < s_next.QuadPart) {
         LONGLONG wait_ticks = s_next.QuadPart - now.QuadPart;
         DWORD wait_ms = (DWORD)(wait_ticks * 1000 / s_freq.QuadPart);
         if (wait_ms > 0 && wait_ms < 100)
             Sleep(wait_ms);
+    } else if (now.QuadPart - s_next.QuadPart > period) {
+        /* Do not accumulate a burst after a debugger stop or long stall. */
+        s_next = now;
     }
-    QueryPerformanceCounter(&now);
-    s_next.QuadPart = now.QuadPart + s_freq.QuadPart / 30;
 }
 
 void dah2_guest_gpu_present(uint32_t guest_device)
