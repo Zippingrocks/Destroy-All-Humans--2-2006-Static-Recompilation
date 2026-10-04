@@ -1,0 +1,3 @@
+#include "dah2_resources.h"
+
+IDB_DAH2_MENU_REFERENCE BITMAP "..\\assets\\dah2_menu_reference.bmp"

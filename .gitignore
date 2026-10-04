@@ -1,0 +1,72 @@
+# Build artifacts
+build/
+build-*/
+out/
+bin/
+*.obj
+*.o
+*.lib
+*.a
+*.exe
+*.dll
+*.pdb
+*.ilk
+*.exp
+*.log
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+
+# Visual Studio
+.vs/
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.sln
+Debug/
+Release/
+x64/
+
+# Generated recompiled code (regenerate from XBE with the recomp pipeline)
+src/recomp/gen/
+
+# Game files (user must provide their own legally-owned copies)
+game/
+game_files/
+game_saves/
+*.xbe
+*.iso
+*.xiso
+
+# Local parity captures, emulator instances, and extracted/generated analysis
+diagnostics/
+xemu_private/
+xboxrecomp/tools/*/output/
+tools/extract-xiso-build*/
+assets/dah2_menu_reference.bmp
+assets/dah2_menu_reference.png
+
+# Local helper binaries and nested third-party checkout
+tools/XbSymbolDatabase/
+BackgroundDesktopCapture.cs
+Repos - Shortcut.lnk
+
+# Python/runtime caches
+__pycache__/
+*.py[cod]
+
+# IDE
+.vscode/
+.idea/
+.claude/
+.codex/
+*.swp
+*.swo
+*~
+
+# OS
+Thumbs.db
+.DS_Store
