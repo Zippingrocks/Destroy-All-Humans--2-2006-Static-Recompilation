@@ -623,10 +623,24 @@ static HRESULT __stdcall tex_UnlockRect(IDirect3DTexture8 *self, UINT Level)
             }
         }
 
-        ID3D11DeviceContext_UpdateSubresource(ctx,
-            (ID3D11Resource *)tex->d3d11_texture,
-            0, NULL, upload_data, tex->pitch, tex->pitch * rows);
-        tex->dirty = FALSE;
+        if (tex->dynamic) {
+            D3D11_MAPPED_SUBRESOURCE mapped;
+            if (SUCCEEDED(ID3D11DeviceContext_Map(ctx,
+                (ID3D11Resource *)tex->d3d11_texture, 0,
+                D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+                for (UINT row = 0; row < rows; ++row)
+                    memcpy((BYTE *)mapped.pData + (size_t)row * mapped.RowPitch,
+                           upload_data + (size_t)row * tex->pitch, tex->pitch);
+                ID3D11DeviceContext_Unmap(ctx,
+                    (ID3D11Resource *)tex->d3d11_texture, 0);
+                tex->dirty = FALSE;
+            }
+        } else {
+            ID3D11DeviceContext_UpdateSubresource(ctx,
+                (ID3D11Resource *)tex->d3d11_texture,
+                0, NULL, upload_data, tex->pitch, tex->pitch * rows);
+            tex->dirty = FALSE;
+        }
 
         if (unswizzled) free(unswizzled);
     }
@@ -676,8 +690,10 @@ HRESULT d3d8_CreateTextureImpl(UINT Width, UINT Height, UINT Levels, DWORD Usage
     td.ArraySize = 1;
     td.Format = tex->dxgi_format;
     td.SampleDesc.Count = 1;
-    td.Usage = D3D11_USAGE_DEFAULT;
+    tex->dynamic = (Usage & D3DUSAGE_DYNAMIC) != 0;
+    td.Usage = tex->dynamic ? D3D11_USAGE_DYNAMIC : D3D11_USAGE_DEFAULT;
     td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    td.CPUAccessFlags = tex->dynamic ? D3D11_CPU_ACCESS_WRITE : 0;
     if (Usage & D3DUSAGE_RENDERTARGET) td.BindFlags |= D3D11_BIND_RENDER_TARGET;
 
     hr = ID3D11Device_CreateTexture2D(d3d8_GetD3D11Device(), &td, NULL, &tex->d3d11_texture);

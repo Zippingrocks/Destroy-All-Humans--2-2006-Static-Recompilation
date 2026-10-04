@@ -38,6 +38,7 @@
 #include <math.h>
 #include <stdint.h>
 #include <intrin.h>
+#include <mmsystem.h>
 #include "boot_window.h"
 #include "trace_control.h"
 
@@ -388,6 +389,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 {
     void *xbe_data = NULL;
     size_t xbe_size = 0;
+    MMRESULT timer_period_result = TIMERR_NOCANDO;
 
     (void)hInstance;
     (void)hPrevInstance;
@@ -500,6 +502,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         CreateThread(NULL, 0, hang_watchdog_thread, NULL, 0, NULL);
     }
 
+    timer_period_result = timeBeginPeriod(1);
     xbe_entry_point();
 
     /* xbe_entry_point only schedules the Xbox bootstrap thread; keep the
@@ -520,6 +523,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     xbox_MemoryLayoutShutdown();
     free(xbe_data);
     dah2_boot_window_stop();
+    if (timer_period_result == TIMERR_NOERROR)
+        timeEndPeriod(1);
 
     return 0;
 }

@@ -10,6 +10,8 @@ body = source.split("static void dah2_frame_cap_30hz(void)", 1)[1].split(
 )[0]
 
 assert "s_next.QuadPart += period;" in body
+assert "CREATE_WAITABLE_TIMER_HIGH_RESOLUTION" in source
+assert "WaitForSingleObject(s_timer, INFINITE);" in body
 assert "s_next.QuadPart = now.QuadPart +" not in body
 assert "now.QuadPart - s_next.QuadPart > period" in body
 

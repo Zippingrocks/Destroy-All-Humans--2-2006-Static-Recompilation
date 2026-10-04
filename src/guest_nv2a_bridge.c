@@ -19,6 +19,9 @@
 #define DAH2_PB_MAX_BYTES          (64u * 1024u * 1024u)
 #define DAH2_CONTIG_START          0x80000000u
 #define DAH2_CONTIG_END            0x88000000u
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
 
 typedef struct Dah2GuestGpuBridge {
     SRWLOCK lock;
@@ -46,6 +49,18 @@ typedef struct Dah2GuestGpuBridge {
 static Dah2GuestGpuBridge g_bridge = {
     .lock = SRWLOCK_INIT,
 };
+
+/* Read-only diagnostics for phase timing of the most recent presented frame.
+ * Values are QPC ticks and can be sampled without enabling textual tracing. */
+volatile uint64_t g_dah2_present_timing_samples;
+volatile uint64_t g_dah2_present_timing_frequency;
+volatile uint64_t g_dah2_present_timing_guest;
+volatile uint64_t g_dah2_present_timing_cap;
+volatile uint64_t g_dah2_present_timing_commit;
+volatile uint64_t g_dah2_present_timing_flush;
+volatile uint64_t g_dah2_present_timing_swap;
+volatile uint64_t g_dah2_present_timing_total;
+volatile uint32_t g_dah2_present_phase;
 
 static uint32_t dah2_pb_address(uint32_t address)
 {
@@ -160,12 +175,42 @@ static int dah2_read_guest_ring(uint32_t guest_device,
 
 static int dah2_guest_gpu_read_physical(uint32_t physical, void *output, uint32_t bytes)
 {
+    static __declspec(thread) uintptr_t cached_start;
+    static __declspec(thread) uintptr_t cached_end;
+    uint32_t guest;
+    uintptr_t native;
+    uintptr_t native_last;
+
     /* This title allocates GPU resources in its separately backed contiguous
      * CPU window. The low virtual window is NOT an alias in this runtime. */
     if (!bytes || physical >= DAH2_CONTIG_END - DAH2_CONTIG_START ||
-        bytes > DAH2_CONTIG_END - DAH2_CONTIG_START - physical ||
-        !dah2_guest_span_valid(DAH2_CONTIG_START + physical, bytes)) return 0;
-    memcpy(output, (const void *)XBOX_PTR(DAH2_CONTIG_START + physical), bytes);
+        bytes > DAH2_CONTIG_END - DAH2_CONTIG_START - physical) return 0;
+    guest = DAH2_CONTIG_START + physical;
+    native = XBOX_PTR(guest);
+    native_last = native + bytes - 1;
+
+    /* Texture uploads arrive one scanline at a time. VirtualQuery on all 896
+     * rows of a Bink frame dominated its runtime, even though those rows share
+     * one committed allocation. Cache only a region already proven readable;
+     * a crossing or a new allocation still takes the full checked path. */
+    if (native < cached_start || native_last >= cached_end) {
+        MEMORY_BASIC_INFORMATION info;
+        uintptr_t region_end;
+        if (VirtualQuery((const void *)native, &info, sizeof(info)) != sizeof(info) ||
+            info.State != MEM_COMMIT ||
+            (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0)
+            return 0;
+        region_end = (uintptr_t)info.BaseAddress + info.RegionSize;
+        if (region_end <= native || native_last >= region_end) {
+            if (!dah2_guest_span_valid(guest, bytes)) return 0;
+            cached_start = native;
+            cached_end = native_last + 1;
+        } else {
+            cached_start = (uintptr_t)info.BaseAddress;
+            cached_end = region_end;
+        }
+    }
+    memcpy(output, (const void *)native, bytes);
     return 1;
 }
 
@@ -458,21 +503,33 @@ static void dah2_frame_cap_30hz(void)
 {
     static LARGE_INTEGER s_freq;
     static LARGE_INTEGER s_next;
+    static HANDLE s_timer;
     LARGE_INTEGER now;
     LONGLONG period;
 
     if (s_freq.QuadPart == 0) {
         QueryPerformanceFrequency(&s_freq);
         QueryPerformanceCounter(&s_next);
+        s_timer = CreateWaitableTimerExW(NULL, NULL,
+                                         CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                         TIMER_ALL_ACCESS);
     }
     period = s_freq.QuadPart / 30;
     s_next.QuadPart += period;
     QueryPerformanceCounter(&now);
     if (now.QuadPart < s_next.QuadPart) {
         LONGLONG wait_ticks = s_next.QuadPart - now.QuadPart;
-        DWORD wait_ms = (DWORD)(wait_ticks * 1000 / s_freq.QuadPart);
-        if (wait_ms > 0 && wait_ms < 100)
-            Sleep(wait_ms);
+        LARGE_INTEGER due;
+        due.QuadPart = -(wait_ticks * 10000000 / s_freq.QuadPart);
+        if (due.QuadPart == 0)
+            due.QuadPart = -1;
+        if (s_timer && SetWaitableTimer(s_timer, &due, 0, NULL, NULL, FALSE)) {
+            WaitForSingleObject(s_timer, INFINITE);
+        } else {
+            DWORD wait_ms = (DWORD)(wait_ticks * 1000 / s_freq.QuadPart);
+            if (wait_ms > 0 && wait_ms < 100)
+                Sleep(wait_ms);
+        }
     } else if (now.QuadPart - s_next.QuadPart > period) {
         /* Do not accumulate a burst after a debugger stop or long stall. */
         s_next = now;
@@ -481,7 +538,15 @@ static void dah2_frame_cap_30hz(void)
 
 void dah2_guest_gpu_present(uint32_t guest_device)
 {
+    static LONGLONG s_last_exit;
+    LARGE_INTEGER qpc_frequency, qpc_mark;
+    LONGLONG entry, after_cap, after_commit, after_flush, after_swap, finished;
     uint32_t current_put;
+
+    QueryPerformanceFrequency(&qpc_frequency);
+    QueryPerformanceCounter(&qpc_mark);
+    entry = qpc_mark.QuadPart;
+    after_cap = after_commit = after_flush = after_swap = entry;
 
     /* TEMP diagnostic: [FPS]/[DAH2-GPU] logging is throttled after frame 8,
      * which could make a real per-frame slowdown look identical to this
@@ -499,8 +564,12 @@ void dah2_guest_gpu_present(uint32_t guest_device)
         DAH2_TRACE_FPRINTF(stderr, "[PRESENT-HEARTBEAT] call #%ld t=%.3fs guest_device=0x%08X\n", n, t, guest_device);
     }
 
+    g_dah2_present_phase = 1;
     dah2_frame_cap_30hz();
+    QueryPerformanceCounter(&qpc_mark);
+    after_cap = qpc_mark.QuadPart;
 
+    g_dah2_present_phase = 2;
     AcquireSRWLockExclusive(&g_bridge.lock);
 
     if (!dah2_guest_span_valid(guest_device, 4u)) {
@@ -514,6 +583,8 @@ void dah2_guest_gpu_present(uint32_t guest_device)
 
     current_put = MEM32(guest_device);
     dah2_guest_gpu_commit_locked(guest_device, current_put);
+    QueryPerformanceCounter(&qpc_mark);
+    after_commit = qpc_mark.QuadPart;
     {
         static volatile long s_after_commit_count;
         long _n = InterlockedIncrement(&s_after_commit_count);
@@ -524,8 +595,14 @@ void dah2_guest_gpu_present(uint32_t guest_device)
     if (g_bridge.renderer_ready) {
         PgraphD3D11Stats stats;
 
+        g_dah2_present_phase = 3;
         pgraph_d3d11_flush();
+        QueryPerformanceCounter(&qpc_mark);
+        after_flush = qpc_mark.QuadPart;
+        g_dah2_present_phase = 4;
         d3d8_PresentFrame();
+        QueryPerformanceCounter(&qpc_mark);
+        after_swap = qpc_mark.QuadPart;
         g_bridge.presents++;
 
         if (g_bridge.presents <= 8 || (g_bridge.presents % 300u) == 0) {
@@ -539,4 +616,16 @@ void dah2_guest_gpu_present(uint32_t guest_device)
     }
 
     ReleaseSRWLockExclusive(&g_bridge.lock);
+    g_dah2_present_phase = 0;
+    QueryPerformanceCounter(&qpc_mark);
+    finished = qpc_mark.QuadPart;
+    g_dah2_present_timing_frequency = (uint64_t)qpc_frequency.QuadPart;
+    g_dah2_present_timing_guest = s_last_exit ? (uint64_t)(entry - s_last_exit) : 0;
+    g_dah2_present_timing_cap = (uint64_t)(after_cap - entry);
+    g_dah2_present_timing_commit = (uint64_t)(after_commit - after_cap);
+    g_dah2_present_timing_flush = (uint64_t)(after_flush - after_commit);
+    g_dah2_present_timing_swap = (uint64_t)(after_swap - after_flush);
+    g_dah2_present_timing_total = (uint64_t)(finished - entry);
+    s_last_exit = finished;
+    g_dah2_present_timing_samples++;
 }

@@ -91,6 +91,7 @@ typedef struct D3D8Texture {
     UINT                    pitch;      /* Row pitch of level 0 */
     BOOL                    locked;
     BOOL                    dirty;
+    BOOL                    dynamic;
 } D3D8Texture;
 
 typedef struct D3D8Surface {

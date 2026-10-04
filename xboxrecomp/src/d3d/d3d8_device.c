@@ -310,7 +310,7 @@ void d3d8_PresentFrame(void)
         DispatchMessageA(&msg);
     }
 
-    /* Present the backbuffer (VSync = 1).  Timestamp the actual call so the
+    /* Present the backbuffer. Timestamp the actual call so the
        resulting log describes the displayed cadence, not just submitted
        command buffers. */
     if (g_device_state.swap_chain) {
@@ -324,7 +324,10 @@ void d3d8_PresentFrame(void)
             g_present_qpc_ready = TRUE;
         }
         d3d8_capture_backbuffer_if_requested(g_present_sample_count + 1ull);
-        IDXGISwapChain_Present(g_device_state.swap_chain, 1, 0);
+        /* The guest bridge applies its own fixed-deadline 30 Hz cap. Waiting
+           for an additional host VBlank here creates a second, phase-dependent
+           limiter (observed as 24 Hz on a 60 Hz desktop). */
+        IDXGISwapChain_Present(g_device_state.swap_chain, 0, 0);
         QueryPerformanceCounter(&now);
         g_present_sample_count++;
         if (g_present_sample_count <= 8 ||

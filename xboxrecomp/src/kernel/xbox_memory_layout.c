@@ -225,7 +225,10 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
         *(volatile uint32_t *)((uintptr_t)(XBOX_KERNEL_DATA_BASE + KDATA_TICK_COUNT)
                                + g_memory_offset) = GetTickCount();
 
-        Sleep(0);  /* yield; the waiter is spinning on another core */
+        /* Polling every millisecond is still much faster than a title frame
+         * while avoiding a permanently runnable worker that consumes an
+         * entire host core. */
+        Sleep(1);
     }
     return 0;
 }

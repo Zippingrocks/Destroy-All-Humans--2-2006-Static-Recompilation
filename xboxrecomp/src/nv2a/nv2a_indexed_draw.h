@@ -584,7 +584,7 @@ static int pgraph_upload_array_texture(IDirect3DDevice8 *dev,unsigned width,unsi
         g_pg.array_texture->lpVtbl->Release(g_pg.array_texture);g_pg.array_texture=NULL;
     }
     if (!g_pg.array_texture) {
-        HRESULT hr=dev->lpVtbl->CreateTexture(dev,width,height,1,0,D3DFMT_LIN_A8R8G8B8,0,&g_pg.array_texture);
+        HRESULT hr=dev->lpVtbl->CreateTexture(dev,width,height,1,D3DUSAGE_DYNAMIC,D3DFMT_LIN_A8R8G8B8,0,&g_pg.array_texture);
         if (FAILED(hr) || !g_pg.array_texture) { free(data);return PGRAPH_REJECT_DEVICE; }
         g_pg.array_texture_width=width;g_pg.array_texture_height=height;
     }

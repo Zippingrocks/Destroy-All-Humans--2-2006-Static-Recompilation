@@ -3733,6 +3733,90 @@ void sub_001A7920(void)
 #undef HI8
 #undef SET_LO8
 
+static __forceinline uint32_t manual_bink_mmx_clamp(uint16_t value)
+{
+    int32_t sum = (int16_t)value + 0x7F00;
+    uint16_t saturated;
+    if (sum > 32767) saturated = 0x7FFF;
+    else if (sum < -32768) saturated = 0x8000;
+    else saturated = (uint16_t)(int16_t)sum;
+    return saturated > 0x7F00 ? saturated - 0x7F00 : 0;
+}
+
+/* The generated scalar recovery is bit-equivalent to the retail four-pixel
+ * MMX converter, but repeatedly translates every guest address. Hoist those
+ * translations once per two scanlines. This keeps the Xbox's 16-bit wrap and
+ * saturation order while leaving enough time for a 29.97 fps Bink frame. */
+void sub_0028DDC0(void)
+{
+    uint32_t groups = *manual_mem32(g_esp + 4);
+    uint32_t dst0_va = *manual_mem32(0x336F90);
+    uint32_t dst1_va = *manual_mem32(0x336F94);
+    uint32_t y0_va = *manual_mem32(0x336F98);
+    uint32_t y1_va = *manual_mem32(0x336F9C);
+    uint32_t u_va = *manual_mem32(0x336FA0);
+    uint32_t v_va = *manual_mem32(0x336FA4);
+    uint32_t *dst0 = manual_mem32(dst0_va);
+    uint32_t *dst1 = manual_mem32(dst1_va);
+    const uint8_t *y0 = manual_mem8(y0_va);
+    const uint8_t *y1 = manual_mem8(y1_va);
+    const uint8_t *u = manual_mem8(u_va);
+    const uint8_t *v = manual_mem8(v_va);
+    const int16_t *y_scale = (const int16_t *)manual_mem8(0x2F1E40);
+    const uint16_t *blue_table = (const uint16_t *)manual_mem8(0x337FB8);
+    const uint16_t *green_u_table = (const uint16_t *)manual_mem8(0x3387B8);
+    const uint16_t *green_v_table = (const uint16_t *)manual_mem8(0x3383B8);
+    const uint16_t *red_table = (const uint16_t *)manual_mem8(0x338BB8);
+
+    for (uint32_t group = 0; group < groups; ++group) {
+        for (uint32_t lane = 0; lane < 4; ++lane) {
+            uint32_t pair = lane >> 1;
+            uint32_t half = lane & 1;
+            uint32_t table_index = (uint32_t)u[pair] * 2 + half;
+            uint32_t v_index = (uint32_t)v[pair] * 2 + half;
+            uint16_t y0w = y0[lane] > 0x10 ? (uint16_t)(y0[lane] - 0x10) : 0;
+            uint16_t y1w = y1[lane] > 0x10 ? (uint16_t)(y1[lane] - 0x10) : 0;
+            int16_t y0term;
+            int16_t y1term;
+            uint16_t blue;
+            uint16_t green;
+            uint16_t red;
+
+            y0w = (uint16_t)(y0w << 2);
+            y1w = (uint16_t)(y1w << 2);
+            y0term = (int16_t)(((int32_t)(int16_t)y0w * y_scale[lane]) >> 16);
+            y1term = (int16_t)(((int32_t)(int16_t)y1w * y_scale[lane]) >> 16);
+
+            blue = (uint16_t)(blue_table[table_index] + (uint16_t)y0term);
+            green = (uint16_t)(green_u_table[table_index] + green_v_table[v_index]);
+            green = (uint16_t)(green + (uint16_t)y0term);
+            red = (uint16_t)(red_table[v_index] + (uint16_t)y0term);
+            dst0[lane] = manual_bink_mmx_clamp(blue) |
+                (manual_bink_mmx_clamp(green) << 8) |
+                (manual_bink_mmx_clamp(red) << 16);
+
+            blue = (uint16_t)(blue_table[table_index] + (uint16_t)y1term);
+            green = (uint16_t)(green_u_table[table_index] + green_v_table[v_index]);
+            green = (uint16_t)(green + (uint16_t)y1term);
+            red = (uint16_t)(red_table[v_index] + (uint16_t)y1term);
+            dst1[lane] = manual_bink_mmx_clamp(blue) |
+                (manual_bink_mmx_clamp(green) << 8) |
+                (manual_bink_mmx_clamp(red) << 16);
+        }
+        dst0 += 4; dst1 += 4;
+        y0 += 4; y1 += 4;
+        u += 2; v += 2;
+    }
+
+    *manual_mem32(0x336F90) = dst0_va + groups * 16;
+    *manual_mem32(0x336F94) = dst1_va + groups * 16;
+    *manual_mem32(0x336F98) = y0_va + groups * 4;
+    *manual_mem32(0x336F9C) = y1_va + groups * 4;
+    *manual_mem32(0x336FA0) = u_va + groups * 2;
+    *manual_mem32(0x336FA4) = v_va + groups * 2;
+    g_esp += 8;
+}
+
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
 {
     /*
@@ -3743,6 +3827,7 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
      * if (xbox_va == 0x000ABCDE) return fixed_sub_000ABCDE;
      */
 
+    if (xbox_va == 0x0028DDC0) return sub_0028DDC0;
     if (xbox_va == 0x0015FF70) return traced_sub_0015FF70;
     if (xbox_va == 0x001602D0) return traced_sub_001602D0;
     if (xbox_va == 0x0015D130) return traced_sub_0015D130;
