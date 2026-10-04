@@ -67,7 +67,7 @@ class ControlGDB(GDB):
         self.stops = []
 
     def request(self, payload):
-        if payload not in {"g", "?"} and not re.fullmatch(r"(?:m[0-9a-f]+,[0-9a-f]+|[Zz]1,[0-9a-f]+,1)", payload):
+        if payload not in {"g", "?"} and not re.fullmatch(r"(?:m[0-9a-f]+,[0-9a-f]+|[Zz][12],[0-9a-f]+,[0-9a-f]+)", payload):
             raise ProbeError(f"Disallowed control GDB packet: {payload}")
         data = payload.encode()
         packet = b"$" + data + f"#{sum(data) & 255:02x}".encode()
@@ -117,8 +117,8 @@ class ControlGDB(GDB):
             return response
         raise ProbeError("No GDB response after 100 packets")
 
-    def breakpoint(self, address, insert=True):
-        response = self.request(f"{'Z' if insert else 'z'}1,{address:x},1")
+    def breakpoint(self, address, insert=True, kind=1, length=1):
+        response = self.request(f"{'Z' if insert else 'z'}{kind},{address:x},{length:x}")
         if response != b"OK":
             raise ProbeError(f"Hardware breakpoint rejected: {response!r}")
 
@@ -204,6 +204,7 @@ def main(argv=None):
     parser.add_argument("--address", type=lambda value: int(value, 0))
     parser.add_argument("--checkpoint", action="append", type=parse_checkpoint, help="Override trace defaults with ordered NAME:0xADDRESS")
     parser.add_argument("--reset", action="store_true", help="Reset owned guest before tracing")
+    parser.add_argument("--write-watch", action="store_true", help="Treat checkpoints as 4-byte guest write watchpoints")
     parser.add_argument("--leave-stopped", action="store_true")
     parser.add_argument("--screenshot", type=Path)
     parser.add_argument("--output", type=Path, help="NEW JSON manifest path")
@@ -259,12 +260,15 @@ def main(argv=None):
                 # Register before requesting installation so cleanup is attempted
                 # even if the target installs it but its reply times out.
                 active_breakpoints.add(address)
-                gdb.breakpoint(address)
+                gdb.breakpoint(address, kind=2 if args.write_watch else 1, length=4 if args.write_watch else 1)
                 result["cleanup"]["breakpoints_remaining"] = [f"0x{value:08x}" for value in sorted(active_breakpoints)]
                 qmp.execute("cont")
                 try:
                     attempt["stop_status"] = wait_stopped(qmp, args.timeout, args.poll_interval)
                     attempt.update(checkpoint_capture(qmp, gdb, name, address))
+                    if args.write_watch:
+                        attempt["trigger_eip"] = attempt["registers"]["i386"]["eip"]
+                        attempt["hit"] = True
                     save()
                     if not attempt["hit"]:
                         raise ProbeError(f"Guest stopped away from checkpoint {name}")
@@ -272,7 +276,7 @@ def main(argv=None):
                     attempt["error"] = str(exc)
                     save()
                     raise
-                gdb.breakpoint(address, False)
+                gdb.breakpoint(address, False, kind=2 if args.write_watch else 1, length=4 if args.write_watch else 1)
                 active_breakpoints.remove(address)
                 save()
         elif args.command == "commands":
@@ -299,7 +303,7 @@ def main(argv=None):
             if gdb:
                 for address in list(active_breakpoints):
                     try:
-                        gdb.breakpoint(address, False)
+                        gdb.breakpoint(address, False, kind=2 if args.write_watch else 1, length=4 if args.write_watch else 1)
                         active_breakpoints.remove(address)
                     except (OSError, ProbeError) as exc:
                         cleanup_errors.append(f"remove 0x{address:08x}: {exc}")

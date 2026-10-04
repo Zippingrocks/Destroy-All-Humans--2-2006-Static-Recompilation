@@ -15,10 +15,12 @@ const script=option('--script');
 const out=option('--out');
 const port=Number(option('--port','1236'));
 const seconds=Number(option('--seconds','5'));
+const bootSeconds=Number(option('--boot-seconds','0'));
 if(!script||!out)throw new Error('--script and --out are required');
 if(!fs.existsSync(script)||fs.existsSync(out))throw new Error('script must exist and output must be new');
 if(!Number.isSafeInteger(port)||port<1||port>65535)throw new Error('invalid port');
 if(!Number.isFinite(seconds)||seconds<1||seconds>60)throw new Error('invalid seconds');
+if(!Number.isFinite(bootSeconds)||bootSeconds<0||bootSeconds>120)throw new Error('invalid boot seconds');
 
 const events=[];
 for(const raw of fs.readFileSync(script,'utf8').split(/\r?\n/)){
@@ -64,7 +66,19 @@ try{
   if(!/^[ST]/.test(stop))throw new Error(`could not stop guest: ${stop}`);
   codeReply=await rsp.packet(`m${inputSite.toString(16)},10`);
  }
- if(codeReply.toLowerCase()!=='535633dbff1510b629008b54240c8b8a')throw new Error(`unexpected DAH2 XInputGetState bytes: ${codeReply}`);
+ const expectedInputCode='535633dbff1510b629008b54240c8b8a';
+ if(codeReply.toLowerCase()!==expectedInputCode&&bootSeconds>0){
+  const bootDeadline=performance.now()+bootSeconds*1000;
+  do{
+   rsp.resume();running=true;
+   await new Promise(resolve=>setTimeout(resolve,250));
+   socket.write(Buffer.from([3]));
+   const stop=await rsp.nextPacket(10000);running=false;
+   if(!/^[ST]/.test(stop))throw new Error('could not stop booting guest: '+stop);
+   codeReply=await rsp.packet('m'+inputSite.toString(16)+',10');
+  }while(codeReply.toLowerCase()!==expectedInputCode&&performance.now()<bootDeadline);
+ }
+ if(codeReply.toLowerCase()!==expectedInputCode)throw new Error('unexpected DAH2 XInputGetState bytes: '+codeReply);
  if(await rsp.packet(`Z1,${inputSite.toString(16)},1`)!=='OK')throw new Error('hardware breakpoint rejected');
  armed=true;
  const deadline=performance.now()+seconds*1000;
