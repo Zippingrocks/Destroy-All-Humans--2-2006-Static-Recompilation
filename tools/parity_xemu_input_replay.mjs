@@ -1,0 +1,111 @@
+/* Background-only logical Xbox pad replay for DAH2 retail xemu.
+ * Hooks the original XDK XInputGetState entry point. It changes only the API
+ * result/return, never menu, save, animation, renderer, or progression state.
+ * Debugger stops perturb wall-clock timing, so use this for state routing and
+ * run capture-free traces separately when certifying timing. */
+import net from 'node:net';
+import fs from 'node:fs';
+import path from 'node:path';
+import {performance} from 'node:perf_hooks';
+import {RspClient} from './parity_rsp_client.mjs';
+
+const args=process.argv.slice(2);
+const option=(key,fallback)=>args.includes(key)?args[args.indexOf(key)+1]:fallback;
+const script=option('--script');
+const out=option('--out');
+const port=Number(option('--port','1236'));
+const seconds=Number(option('--seconds','5'));
+if(!script||!out)throw new Error('--script and --out are required');
+if(!fs.existsSync(script)||fs.existsSync(out))throw new Error('script must exist and output must be new');
+if(!Number.isSafeInteger(port)||port<1||port>65535)throw new Error('invalid port');
+if(!Number.isFinite(seconds)||seconds<1||seconds>60)throw new Error('invalid seconds');
+
+const events=[];
+for(const raw of fs.readFileSync(script,'utf8').split(/\r?\n/)){
+ const line=raw.trim();
+ if(!line||line.startsWith('#'))continue;
+ const fields=line.split(/\s+/);
+ if(![9,15].includes(fields.length))throw new Error('input rows require 9 or 15 fields');
+ if(fields.some((value,index)=>!(index===2 ? /^(?:0x)?[0-9a-f]+$/i.test(value) : /^-?\d+$/.test(value))))throw new Error('invalid numeric token');
+ const values=fields.map((value,index)=>parseInt(value,index===2?16:10));
+ const [start,duration,buttons,a,b,lx,ly,rx,ry,x=0,y=0,black=0,white=0,lt=0,rt=0]=values;
+ if(start<0||duration<1||start>1000000||duration>100000||buttons<0||buttons>65535||
+    [a,b,x,y,black,white,lt,rt].some(value=>value<0||value>255)||
+    [lx,ly,rx,ry].some(value=>value< -32768||value>32767))throw new Error('input outside controller range');
+ events.push({start,duration,buttons,analog:[a,b,x,y,black,white,lt,rt],sticks:[lx,ly,rx,ry]});
+}
+
+const fd=fs.openSync(out,'wx');
+const trace={schema:1,source:'dah2-xemu-logical-pad',port,script:path.resolve(script),
+ inputBoundary:'0x00296224',startedAt:new Date().toISOString(),events:[],
+ limitation:'Synthetic XPP API results; excludes physical-controller fidelity and wall-clock timing because debugger stops perturb execution'};
+const socket=net.createConnection({host:'127.0.0.1',port});
+socket.setNoDelay(true);
+await new Promise((resolve,reject)=>{socket.once('connect',resolve);socket.once('error',reject);});
+const rsp=new RspClient(socket);
+const inputSite=0x296224;
+let armed=false,running=false,samples=0,packet=0,lastPad='';
+async function read(address,length){
+ const reply=await rsp.packet(`m${address.toString(16)},${length.toString(16)}`);
+ if(!/^[0-9a-f]+$/i.test(reply)||reply.length!==length*2)throw new Error(`guest read failed at 0x${address.toString(16)}`);
+ return Buffer.from(reply,'hex');
+}
+async function write(address,data){
+ const reply=await rsp.packet(`M${address.toString(16)},${data.length.toString(16)}:${data.toString('hex')}`);
+ if(reply!=='OK')throw new Error(`guest write failed at 0x${address.toString(16)}`);
+}
+try{
+ let supported=await rsp.packet('qSupported:multiprocess+;swbreak+');
+ if(/^[ST]/.test(supported))supported=await rsp.packet('qSupported:multiprocess+;swbreak+');
+ let codeReply=await rsp.packet(`m${inputSite.toString(16)},10`);
+ if(!/^[0-9a-f]{32}$/i.test(codeReply)){
+  socket.write(Buffer.from([3]));
+  const stop=await rsp.nextPacket(10000);
+  if(!/^[ST]/.test(stop))throw new Error(`could not stop guest: ${stop}`);
+  codeReply=await rsp.packet(`m${inputSite.toString(16)},10`);
+ }
+ if(codeReply.toLowerCase()!=='535633dbff1510b629008b54240c8b8a')throw new Error(`unexpected DAH2 XInputGetState bytes: ${codeReply}`);
+ if(await rsp.packet(`Z1,${inputSite.toString(16)},1`)!=='OK')throw new Error('hardware breakpoint rejected');
+ armed=true;
+ const deadline=performance.now()+seconds*1000;
+ rsp.resume();running=true;
+ while(performance.now()<deadline){
+  let stop;
+  try{stop=await rsp.nextPacket(Math.max(1,deadline-performance.now()));}
+  catch(error){if(error.message.includes('timed out'))break;throw error;}
+  running=false;
+  if(!/^[ST]/.test(stop))continue;
+  const rawRegisters=await rsp.packet('g');
+  if(!/^[0-9a-f]+$/i.test(rawRegisters)||rawRegisters.length<80)throw new Error('unexpected i386 register packet');
+  const registers=Buffer.from(rawRegisters,'hex');
+  const eip=registers.readUInt32LE(32),esp=registers.readUInt32LE(16);
+  if(eip!==inputSite)throw new Error(`unexpected breakpoint stop at 0x${eip.toString(16)}`);
+  const stack=await read(esp,12),ret=stack.readUInt32LE(0),state=stack.readUInt32LE(8);
+  const pad=Buffer.alloc(22);
+  for(const event of events){
+   if(samples<event.start||samples>=event.start+event.duration)continue;
+   pad.writeUInt16LE(pad.readUInt16LE(4)|event.buttons,4);
+   event.analog.forEach((value,index)=>{if(value)pad[6+index]=value;});
+   event.sticks.forEach((value,index)=>{if(value)pad.writeInt16LE(value,14+index*2);});
+  }
+  const signature=pad.subarray(4).toString('hex');
+  if(signature!==lastPad){lastPad=signature;++packet;trace.events.push({sample:samples,pad:signature});}
+  pad.writeUInt32LE(packet,0);
+  await write(state,pad);
+  registers.writeUInt32LE(0,0);
+  registers.writeUInt32LE((esp+12)>>>0,16);
+  registers.writeUInt32LE(ret,32);
+  if(await rsp.packet('G'+registers.toString('hex'))!=='OK')throw new Error('controller return rejected');
+  ++samples;
+  rsp.resume();running=true;
+ }
+ if(!samples)throw new Error('no controller polls observed');
+}catch(error){trace.error=error.message;process.exitCode=1;}
+finally{
+ if(running){socket.write(Buffer.from([3]));try{await rsp.nextPacket(5000);}catch{}}
+ if(armed)try{await rsp.packet(`z1,${inputSite.toString(16)},1`);}catch{}
+ rsp.resume();rsp.close();
+ trace.samples=samples;trace.finishedAt=new Date().toISOString();
+ fs.writeSync(fd,JSON.stringify(trace,null,2)+'\n');fs.closeSync(fd);
+ console.log(JSON.stringify(trace));
+}
