@@ -306,7 +306,7 @@ static int pgraph_read_vertex(uint32_t index,unsigned attributes,NV2AVertexResul
         PG_REG(NV097_SET_TRANSFORM_PROGRAM_START),input,g_pg.constants,result)==NV2A_VP_OK;
 }
 
-static int pgraph_pack_vertex(const NV2AVertexResult *r,OutputVertex *v,unsigned tw,unsigned th) {
+static int pgraph_pack_vertex(const NV2AVertexResult *r,OutputVertex *v,unsigned tw,unsigned th,int texel_coords) {
     if (r->written_mask[0]!=15 || r->written_mask[3]!=15 || r->written_mask[9]!=15) return 0;
     for (unsigned o=0;o<NV2A_VP_OUTPUTS;o++)for(unsigned c=0;c<4;c++)
         if (!isfinite(r->output[o][c])) return 0;
@@ -317,7 +317,8 @@ static int pgraph_pack_vertex(const NV2AVertexResult *r,OutputVertex *v,unsigned
     v->x=truncf(r->output[0][0]*16.0f)/16.0f;
     v->y=truncf(r->output[0][1]*16.0f)/16.0f;
     v->z=0;v->rhw=1;
-    v->u=r->output[9][0]/tw;v->v=r->output[9][1]/th;
+    v->u=texel_coords ? r->output[9][0] : r->output[9][0]/tw;
+    v->v=texel_coords ? r->output[9][1] : r->output[9][1]/th;
     if (!isfinite(v->x) || !isfinite(v->y) || !isfinite(v->u) || !isfinite(v->v)) return 0;
     uint32_t color[4];
     for(unsigned c=0;c<4;c++) {
@@ -341,15 +342,23 @@ typedef struct {
     float uv[8];
 } PgraphOutputVertex4;
 
-static int pgraph_pack_vertex4(const NV2AVertexResult *r,PgraphOutputVertex4 *v,unsigned tw,unsigned th) {
-    if (!pgraph_pack_vertex(r,(OutputVertex *)v,tw,th)) return 0;
+static int pgraph_pack_vertex4(const NV2AVertexResult *r,PgraphOutputVertex4 *v,
+    unsigned tw,unsigned th,unsigned texel_coord_mask) {
+    if (!pgraph_pack_vertex(r,(OutputVertex *)v,tw,th,texel_coord_mask&1u)) return 0;
     for (unsigned stage=0;stage<4;stage++) {
         unsigned output=9+stage;
         /* PROJECT2D consumes XY; the title shader deliberately writes zero
-         * Z/W after scaling each coordinate by its jitter constant. */
+         * Z/W after scaling each coordinate by its jitter constant.  Linear
+         * NV2A textures retain texel coordinates through interpolation and
+         * normalize them in the fragment stage, matching xemu. */
         if (r->written_mask[output]!=15) return 0;
-        v->uv[stage*2]=r->output[output][0]/tw;
-        v->uv[stage*2+1]=r->output[output][1]/th;
+        if (texel_coord_mask&(1u<<stage)) {
+            v->uv[stage*2]=r->output[output][0];
+            v->uv[stage*2+1]=r->output[output][1];
+        } else {
+            v->uv[stage*2]=r->output[output][0]/tw;
+            v->uv[stage*2+1]=r->output[output][1]/th;
+        }
         if (!isfinite(v->uv[stage*2]) || !isfinite(v->uv[stage*2+1])) return 0;
     }
     return 1;
@@ -605,6 +614,10 @@ static void submit_indexed_draw(void) {
     size_t vertex_stride=sizeof(OutputVertex);
     unsigned reason=g_pg.draw_error,detail=0,length=0,attributes=0;
     unsigned profile=pgraph_array_profile();
+    unsigned texel_coord_mask=profile==PGRAPH_ARRAY_PROFILE_DAH2_ACCUMULATE4_XRGB ? 15u :
+        (profile==PGRAPH_ARRAY_PROFILE_TEXTURED_ARGB ||
+         profile==PGRAPH_ARRAY_PROFILE_TEXTURED_XRGB ||
+         profile==PGRAPH_ARRAY_PROFILE_DAH2_SUBTRACT_XRGB) ? 1u : 0u;
     pgraph_record_recent_draw(1,profile,g_pg.index_count);
     { static unsigned title_trace;
       if (profile==PGRAPH_ARRAY_PROFILE_DAH2_ACCUMULATE4_XRGB) title_trace=32;
@@ -651,7 +664,7 @@ static void submit_indexed_draw(void) {
         if (!pgraph_read_vertex(detail,attributes,&result)) { reason=PGRAPH_REJECT_MEMORY;goto rejected; }
         OutputVertex *vertex=(OutputVertex *)((unsigned char *)vertices+i*vertex_stride);
         if (profile==PGRAPH_ARRAY_PROFILE_DAH2_ACCUMULATE4_XRGB) {
-            if (!pgraph_pack_vertex4(&result,(PgraphOutputVertex4 *)vertex,width,height)) {
+            if (!pgraph_pack_vertex4(&result,(PgraphOutputVertex4 *)vertex,width,height,texel_coord_mask)) {
                 static int output_dumped;
                 if (!output_dumped) {
                     fprintf(stderr,"[PGRAPH-OUTPUT4] index=%u",detail);
@@ -663,7 +676,7 @@ static void submit_indexed_draw(void) {
                 }
                 reason=PGRAPH_REJECT_OUTPUT;goto rejected;
             }
-        } else if (!pgraph_pack_vertex(&result,vertex,width,height)) {
+        } else if (!pgraph_pack_vertex(&result,vertex,width,height,texel_coord_mask&1u)) {
             reason=PGRAPH_REJECT_OUTPUT;goto rejected;
         }
         if (profile==PGRAPH_ARRAY_PROFILE_MOVIE) pgraph_movie_vertex_alpha(vertex);
@@ -686,6 +699,7 @@ static void submit_indexed_draw(void) {
     IDirect3DDevice8 *dev=xbox_GetD3DDevice();
     if (!dev) { reason=PGRAPH_REJECT_DEVICE;goto rejected; }
     IDirect3DTexture8 *surface_texture=pgraph_surface_texture(PG_REG(NV097_SET_TEXTURE_OFFSET));
+
     static int title_content_trace;
     if (profile==PGRAPH_ARRAY_PROFILE_DAH2_SUBTRACT_XRGB &&
         PG_REG(NV097_SET_SURFACE_COLOR_OFFSET)==0x07743000u) title_content_trace=1;
@@ -764,10 +778,13 @@ static void submit_indexed_draw(void) {
         PG_TSS_STAGE(s,D3DTSS_MIPMAPLODBIAS,0);
     }
     PG_CALL(dev->lpVtbl->BeginScene(dev));
+    d3d8_shaders_set_texel_coord_mask(texel_coord_mask);
     unsigned primitives=g_pg.draw_mode==5 ? g_pg.index_count/3 : g_pg.index_count-2;
-    HRESULT draw_result=dev->lpVtbl->DrawPrimitiveUP(dev,g_pg.draw_mode==5 ? D3DPT_TRIANGLELIST : D3DPT_TRIANGLESTRIP,
+    HRESULT draw_result=dev->lpVtbl->DrawPrimitiveUP(dev,
+        g_pg.draw_mode==5 ? D3DPT_TRIANGLELIST : D3DPT_TRIANGLESTRIP,
         primitives,vertices,(UINT)vertex_stride);
     HRESULT end_result=dev->lpVtbl->EndScene(dev);
+    d3d8_shaders_set_texel_coord_mask(0);
     PG_CALL(draw_result);PG_CALL(end_result);
     if (g_pg.stats.indexed_draws<8)
         pgraph_report_surface(PG_REG(NV097_SET_SURFACE_COLOR_OFFSET),"early-target");

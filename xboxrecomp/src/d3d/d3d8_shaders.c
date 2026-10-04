@@ -295,10 +295,17 @@ static const char g_ps_source[] =
     "    float4 texels[4];\n"
     "\n"
     "    // Pre-sample all textures\n"
-    "    texels[0] = tex0.Sample(samp0, input.tex0);\n"
-    "    texels[1] = tex1.Sample(samp1, input.tex1);\n"
-    "    texels[2] = tex2.Sample(samp2, input.tex2);\n"
-    "    texels[3] = tex3.Sample(samp3, input.tex3);\n"
+    "    uint w0, h0, w1, h1, w2, h2, w3, h3;\n"
+    "    tex0.GetDimensions(w0, h0); tex1.GetDimensions(w1, h1);\n"
+    "    tex2.GetDimensions(w2, h2); tex3.GetDimensions(w3, h3);\n"
+    "    float2 tc0 = (PSFlags &  8u) ? input.tex0 / float2(w0, h0) : input.tex0;\n"
+    "    float2 tc1 = (PSFlags & 16u) ? input.tex1 / float2(w1, h1) : input.tex1;\n"
+    "    float2 tc2 = (PSFlags & 32u) ? input.tex2 / float2(w2, h2) : input.tex2;\n"
+    "    float2 tc3 = (PSFlags & 64u) ? input.tex3 / float2(w3, h3) : input.tex3;\n"
+    "    texels[0] = tex0.Sample(samp0, tc0);\n"
+    "    texels[1] = tex1.Sample(samp1, tc1);\n"
+    "    texels[2] = tex2.Sample(samp2, tc2);\n"
+    "    texels[3] = tex3.Sample(samp3, tc3);\n"
     "\n"
     "    // Process up to 4 texture stages\n"
     "    [unroll] for (uint i = 0; i < 4; i++) {\n"
@@ -381,6 +388,7 @@ static ID3DBlob            *g_vs_blob = NULL;
 static ID3D11Buffer        *g_vs_cb = NULL;      /* VS transform CB (b0) */
 static ID3D11Buffer        *g_vs_light_cb = NULL; /* VS lighting CB (b1) */
 static ID3D11Buffer        *g_ps_cb = NULL;       /* PS constant buffer */
+static UINT                 g_texel_coord_mask;
 
 /* VS transform constant buffer layout (must match HLSL TransformCB) */
 typedef struct {
@@ -720,6 +728,11 @@ void d3d8_shaders_shutdown(void)
  * Pre-draw binding
  * ================================================================ */
 
+void d3d8_shaders_set_texel_coord_mask(UINT mask)
+{
+    g_texel_coord_mask = mask & 15u;
+}
+
 void d3d8_shaders_prepare_draw(DWORD fvf)
 {
     ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
@@ -915,6 +928,7 @@ void d3d8_shaders_prepare_draw(DWORD fvf)
         /* Specular add */
         if (rs && rs[D3DRS_SPECULARENABLE])
             pc->ps_flags |= 4;
+        pc->ps_flags |= (g_texel_coord_mask & 15u) << 3;
 
         /* Per-stage texture state */
         for (stage = 0; stage < 4; stage++) {
