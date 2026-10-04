@@ -20,6 +20,8 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 #include <math.h>
 #include <windows.h>  /* GetCurrentThreadId, for multi-thread-aware tracing */
 #include "trace_control.h"
@@ -2226,6 +2228,413 @@ extern int g_manual_transplant_icall_trace;
     } \
 } while (0)
 
+/* DAH2_INPUT_REPLAY_BEGIN
+ * DAH1-style logical controller replay at the retail XInputGetState boundary.
+ * It is enabled only for an explicitly hidden diagnostic run. No host input
+ * device is queried, and the ordinary generated XPP path remains unchanged. */
+typedef struct Dah2InputEvent {
+    unsigned start, duration, buttons;
+    unsigned analog[8];
+    int sticks[4];
+} Dah2InputEvent;
+
+#define DAH2_INPUT_HANDLE_BASE 0xDA220000u
+static int g_dah2_input_reported;
+
+extern void sub_00296301(void);
+extern void sub_000FAFD5(void);
+extern void sub_00297D9A(void);
+extern void sub_00297A06(void);
+
+static int dah2_hidden_input_enabled(void)
+{
+    const char *hidden = getenv("DAH2_TEST_WINDOW_HIDDEN");
+    const char *script = getenv("DAH2_INPUT_SCRIPT");
+    return hidden && strcmp(hidden, "1") == 0 && script && *script;
+}
+
+static void dah2_scripted_xinput_get_state(void)
+{
+    static Dah2InputEvent events[128];
+    static unsigned event_count, poll, packet;
+    static unsigned char previous_payload[18];
+    static int loaded, have_previous;
+    unsigned char state[22] = {0};
+    uint32_t output = MEM32(esp + 8u);
+    unsigned i;
+
+    if (!loaded) {
+        const char *path = getenv("DAH2_INPUT_SCRIPT");
+        FILE *file = path ? fopen(path, "r") : NULL;
+        loaded = 1;
+        if (!file) {
+            fprintf(stderr, "[DAH2-INPUT] cannot read hidden input schedule; neutral pad only\n");
+        } else {
+            char line[256];
+            while (fgets(line, sizeof(line), file)) {
+                Dah2InputEvent event = {0};
+                char extra;
+                char *cursor = line;
+                int fields;
+                while (*cursor == ' ' || *cursor == '\t') ++cursor;
+                if (!*cursor || *cursor == '#' || *cursor == '\r' || *cursor == '\n') continue;
+                fields = sscanf(cursor,
+                    "%u %u %x %u %u %d %d %d %d %u %u %u %u %u %u %c",
+                    &event.start, &event.duration, &event.buttons,
+                    &event.analog[0], &event.analog[1],
+                    &event.sticks[0], &event.sticks[1],
+                    &event.sticks[2], &event.sticks[3],
+                    &event.analog[2], &event.analog[3],
+                    &event.analog[4], &event.analog[5],
+                    &event.analog[6], &event.analog[7], &extra);
+                if (event_count >= 128u || (fields != 9 && fields != 15) ||
+                    !event.duration || event.start > 1000000u || event.duration > 100000u ||
+                    event.buttons > 0xFFFFu ||
+                    event.analog[0] > 255u || event.analog[1] > 255u ||
+                    event.analog[2] > 255u || event.analog[3] > 255u ||
+                    event.analog[4] > 255u || event.analog[5] > 255u ||
+                    event.analog[6] > 255u || event.analog[7] > 255u ||
+                    event.sticks[0] < -32768 || event.sticks[0] > 32767 ||
+                    event.sticks[1] < -32768 || event.sticks[1] > 32767 ||
+                    event.sticks[2] < -32768 || event.sticks[2] > 32767 ||
+                    event.sticks[3] < -32768 || event.sticks[3] > 32767) {
+                    event_count = 0;
+                    fprintf(stderr, "[DAH2-INPUT] invalid schedule row; neutral pad only\n");
+                    break;
+                }
+                events[event_count++] = event;
+            }
+            fclose(file);
+            fprintf(stderr,
+                "[DAH2-INPUT] loaded %u events; physical input disabled at retail boundary\n",
+                event_count);
+            fflush(stderr);
+        }
+    }
+
+    for (i = 0; i < event_count; ++i) {
+        const Dah2InputEvent *event = &events[i];
+        uint16_t buttons;
+        if (poll < event->start || poll - event->start >= event->duration) continue;
+        memcpy(&buttons, state + 4, sizeof(buttons));
+        buttons = (uint16_t)(buttons | event->buttons);
+        memcpy(state + 4, &buttons, sizeof(buttons));
+        for (unsigned channel = 0; channel < 8; ++channel)
+            if (event->analog[channel]) state[6 + channel] = (unsigned char)event->analog[channel];
+        for (unsigned axis = 0; axis < 4; ++axis)
+            if (event->sticks[axis]) {
+                int16_t value = (int16_t)event->sticks[axis];
+                memcpy(state + 14 + axis * 2, &value, sizeof(value));
+            }
+    }
+    if (!have_previous || memcmp(previous_payload, state + 4, sizeof(previous_payload)) != 0) {
+        ++packet;
+        memcpy(previous_payload, state + 4, sizeof(previous_payload));
+        have_previous = 1;
+        fprintf(stderr,
+            "[DAH2-INPUT] poll=%u packet=%u buttons=%04X\n",
+            poll, packet, (unsigned)(state[4] | ((unsigned)state[5] << 8)));
+        fflush(stderr);
+    }
+    memcpy(state, &packet, sizeof(packet));
+    if (output >= 0x10000u && output <= 0x08000000u - sizeof(state))
+        memcpy(manual_mem8(output), state, sizeof(state));
+    else
+        fprintf(stderr, "[DAH2-INPUT] invalid output=%08X\n", output);
+    ++poll;
+    eax = 0;       /* ERROR_SUCCESS */
+    esp += 12u;    /* ret 8 */
+}
+
+/* Match DAH1's retail-device lifecycle at the Xbox XPP boundary.  These
+ * overrides exist because the game calls them directly, before GetState can
+ * ever be reached.  Hidden parity runs expose one private neutral controller;
+ * ordinary launches retain the generated Xbox-library behavior verbatim. */
+void sub_002961C2(void)
+{
+    uint32_t ebp;
+    if (dah2_hidden_input_enabled()) {
+        uint32_t type = MEM32(esp + 4u);
+        uint32_t port = MEM32(esp + 8u);
+        uint32_t slot = MEM32(esp + 12u);
+        uint32_t polling = MEM32(esp + 16u);
+        if (port < 4u && slot == 0u) {
+            eax = DAH2_INPUT_HANDLE_BASE + port;
+            fprintf(stderr,
+                "[DAH2-INPUT] XInputOpen type=%08X port=%u slot=%u polling=%08X handle=%08X\n",
+                type, port, slot, polling, eax);
+        } else {
+            eax = 0;
+            fprintf(stderr,
+                "[DAH2-INPUT] XInputOpen rejected port=%u slot=%u polling=%08X\n",
+                port, slot, polling);
+        }
+        fflush(stderr);
+        esp += 20u; /* ret 16 */
+        return;
+    }
+
+    PUSH32(esp, ebp);
+    ebp = esp;
+    g_ebp = ebp;
+    PUSH32(esp, ecx);
+    ecx = MEM32(ebp + 8u);
+    MEM32(ebp - 4u) = 0;
+    g_ebp = ebp;
+    PUSH32(esp, 0x002961D2u);
+    sub_00296301();
+    if (eax == 0) {
+        PUSH32(esp, 0x57u);
+        g_ebp = ebp;
+        PUSH32(esp, 0x002961DDu);
+        sub_000FAFD5();
+        eax = 0;
+    } else {
+        PUSH32(esp, esi);
+        esi = MEM32(ebp + 0x14u);
+        if (esi == 0) esi = MEM32(eax + 0x10u);
+        edx = MEM32(ebp + 0xCu);
+        if (MEM32(ebp + 0x10u) == 1u) edx += 0x10u;
+        PUSH32(esp, esi);
+        ecx = ebp - 4u;
+        PUSH32(esp, ecx);
+        ecx = eax;
+        g_ebp = ebp;
+        PUSH32(esp, 0x00296204u);
+        sub_00297D9A();
+        POP32(esp, esi);
+        if (MEM32(ebp - 4u) == 0) {
+            PUSH32(esp, eax);
+            g_ebp = ebp;
+            PUSH32(esp, 0x00296211u);
+            sub_000FAFD5();
+        }
+        eax = MEM32(ebp - 4u);
+    }
+    esp = ebp;
+    POP32(esp, ebp);
+    esp += 20u; /* ret 16 */
+}
+
+void sub_00296218(void)
+{
+    if (dah2_hidden_input_enabled()) {
+        uint32_t handle = MEM32(esp + 4u);
+        uint32_t port = handle - DAH2_INPUT_HANDLE_BASE;
+        if (port >= 4u)
+            fprintf(stderr, "[DAH2-INPUT] XInputClose unknown handle=%08X\n", handle);
+        fflush(stderr);
+        esp += 8u; /* ret 4 */
+        return;
+    }
+    ecx = MEM32(esp + 4u);
+    PUSH32(esp, 0x00296221u);
+    sub_00297A06();
+    esp += 8u; /* ret 4 */
+}
+
+void sub_00296297(void)
+{
+    if (dah2_hidden_input_enabled()) {
+        static int logged;
+        uint32_t handle = MEM32(esp + 4u);
+        uint32_t port = handle - DAH2_INPUT_HANDLE_BASE;
+        eax = port < 4u ? 0u : 0x48Fu;
+        if (!logged) {
+            fprintf(stderr,
+                "[DAH2-INPUT] XInputSetState handle=%08X vibration suppressed result=%08X\n",
+                handle, eax);
+            fflush(stderr);
+            logged = 1;
+        }
+        esp += 12u; /* ret 8 */
+        return;
+    }
+
+    ecx = MEM32(esp + 4u);
+    eax = ecx + 0xA3u;
+    edx = MEM32(eax);
+    if ((MEM8(edx + 0x28u) & 0x20u) != 0) {
+        eax = 0x57u;
+    } else {
+        edx = MEM32(esp + 8u);
+        MEM8(edx + 0x40u) = 0;
+        eax = MEM32(eax);
+        eax = MEM32(eax + 0xCu);
+        SET_LO8(eax, MEM8(eax));
+        SET_LO8(eax, LO8(eax) + 2u);
+        MEM8(edx + 0x41u) = LO8(eax);
+        PUSH32(esp, 0x002962C7u);
+        {
+            extern void sub_00297A9A(void);
+            sub_00297A9A();
+        }
+    }
+    esp += 12u; /* ret 8 */
+}
+
+void sub_00296353(void)
+{
+    uint32_t saved_entry_esp, target;
+    if (dah2_hidden_input_enabled()) {
+        uint32_t type = MEM32(esp + 4u);
+        g_dah2_input_reported = 1;
+        eax = 1u;
+        fprintf(stderr, "[DAH2-INPUT] XGetDevices type=%08X mask=00000001\n", type);
+        fflush(stderr);
+        esp += 8u; /* ret 4 */
+        return;
+    }
+
+    saved_entry_esp = esp;
+    PUSH32(esp, esi);
+    target = MEM32(0x29B610u);
+    PUSH32(esp, 0x0029635Au);
+    RECOMP_ICALL_SAFE(target, saved_entry_esp);
+    edx = MEM32(esp + 8u);
+    esi = MEM32(edx);
+    MEM32(edx + 4u) = 0;
+    SET_LO8(ecx, LO8(eax));
+    MEM32(edx + 8u) = esi;
+    saved_entry_esp = esp;
+    target = MEM32(0x29B60Cu);
+    PUSH32(esp, 0x0029636Fu);
+    RECOMP_ICALL_SAFE(target, saved_entry_esp);
+    eax = esi;
+    POP32(esp, esi);
+    esp += 8u; /* ret 4 */
+}
+
+void sub_00296375(void)
+{
+    uint32_t ebp, saved_entry_esp, target;
+    if (dah2_hidden_input_enabled()) {
+        uint32_t type = MEM32(esp + 4u);
+        uint32_t inserted_out = MEM32(esp + 8u);
+        uint32_t removed_out = MEM32(esp + 12u);
+        uint32_t inserted = g_dah2_input_reported ? 0u : 1u;
+        g_dah2_input_reported = 1;
+        MEM32(inserted_out) = inserted;
+        MEM32(removed_out) = 0;
+        eax = inserted != 0u;
+        if (inserted)
+            fprintf(stderr,
+                "[DAH2-INPUT] XGetDeviceChanges type=%08X inserted=00000001\n",
+                type);
+        fflush(stderr);
+        esp += 16u; /* ret 12 */
+        return;
+    }
+
+    PUSH32(esp, ebp);
+    ebp = esp;
+    g_ebp = ebp;
+    PUSH32(esp, esi);
+    esi = MEM32(ebp + 8u);
+    eax = 0;
+    if (MEM32(esi + 4u) == 0) {
+        ecx = MEM32(ebp + 0xCu);
+        MEM32(ecx) = 0;
+        ecx = MEM32(ebp + 0x10u);
+        MEM32(ecx) = 0;
+    } else {
+        saved_entry_esp = esp;
+        PUSH32(esp, ebx);
+        PUSH32(esp, edi);
+        target = MEM32(0x29B610u);
+        PUSH32(esp, 0x00296397u);
+        RECOMP_ICALL_SAFE(target, saved_entry_esp);
+        ecx = ~MEM32(esi + 8u);
+        ebx = MEM32(ebp + 0xCu);
+        ecx &= MEM32(esi);
+        MEM32(ebx) = ecx;
+        edx = ~MEM32(esi);
+        ecx = MEM32(ebp + 0x10u);
+        edx &= MEM32(esi + 8u);
+        MEM32(ecx) = edx;
+        edi = MEM32(esi + 4u);
+        edi &= MEM32(esi + 8u);
+        edi &= MEM32(esi);
+        edx |= edi;
+        MEM32(ecx) = edx;
+        MEM32(ebx) |= edi;
+        ecx = MEM32(esi);
+        MEM32(esi + 4u) = 0;
+        MEM32(esi + 8u) = ecx;
+        SET_LO8(ecx, LO8(eax));
+        saved_entry_esp = esp;
+        target = MEM32(0x29B60Cu);
+        PUSH32(esp, 0x002963CEu);
+        RECOMP_ICALL_SAFE(target, saved_entry_esp);
+        eax = MEM32(ebx) | MEM32(MEM32(ebp + 0x10u));
+        POP32(esp, edi);
+        eax = eax != 0u;
+        POP32(esp, ebx);
+    }
+    POP32(esp, esi);
+    POP32(esp, ebp);
+    esp += 16u; /* ret 12 */
+}
+
+/* Full retail fallback plus the opt-in logical adapter. This definition is
+ * intentionally linked before the generated duplicate, like the other manual
+ * translation repairs in this file. */
+void sub_00296224(void)
+{
+    uint32_t saved_entry_esp, target;
+    if (dah2_hidden_input_enabled()) {
+        dah2_scripted_xinput_get_state();
+        return;
+    }
+
+    saved_entry_esp = esp;
+    PUSH32(esp, ebx);
+    PUSH32(esp, esi);
+    ebx = 0;
+    target = MEM32(0x29B610u);
+    PUSH32(esp, 0x0029622Eu);
+    RECOMP_ICALL_SAFE(target, saved_entry_esp);
+
+    edx = MEM32(esp + 0xCu);
+    ecx = MEM32(edx + 0xA3u);
+    if ((MEM8(ecx + 0x28u) & 0x10u) != 0) {
+        esi = 0x57u;
+    } else {
+        ecx = MEM32(edx);
+        if (!ecx || (MEM8(ecx + 4u) & 2u) == 0) ebx = 0x48Fu;
+        ecx = MEM32(edx + 8u);
+        PUSH32(esp, edi);
+        edi = MEM32(esp + 0x14u);
+        MEM32(edi) = ecx;
+        MEM8(edx + 0xA2u) &= 0xEFu;
+        ecx = MEM32(edx + 0xA3u);
+        ecx = MEM32(ecx + 8u);
+        ecx = (uint32_t)MEM8(ecx);
+        esi = edx + 0x14u;
+        {
+            uint32_t bytes = ecx;
+            edi += 4u;
+            memcpy(manual_mem8(edi), manual_mem8(esi), bytes);
+            esi += bytes;
+            edi += bytes;
+            ecx = 0;
+        }
+        esi = ebx;
+        POP32(esp, edi);
+    }
+
+    SET_LO8(ecx, LO8(eax));
+    saved_entry_esp = esp;
+    target = MEM32(0x29B60Cu);
+    PUSH32(esp, 0x00296290u);
+    RECOMP_ICALL_SAFE(target, saved_entry_esp);
+    eax = esi;
+    POP32(esp, esi);
+    POP32(esp, ebx);
+    esp += 12u;
+}
+/* DAH2_INPUT_REPLAY_END */
+
 /* Retail draw-record constructor, 0x0016E200..0x0016E3E6.  The generated
  * extent stopped at 0x0016E2DC, before the remaining packed fields and the
  * four register pops / RET 0x30.  Three live calls leaked 3 * 0x44 bytes.
@@ -3827,6 +4236,12 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
      * if (xbox_va == 0x000ABCDE) return fixed_sub_000ABCDE;
      */
 
+    if (xbox_va == 0x002961C2) return sub_002961C2;
+    if (xbox_va == 0x00296218) return sub_00296218;
+    if (xbox_va == 0x00296224) return sub_00296224;
+    if (xbox_va == 0x00296297) return sub_00296297;
+    if (xbox_va == 0x00296353) return sub_00296353;
+    if (xbox_va == 0x00296375) return sub_00296375;
     if (xbox_va == 0x0028DDC0) return sub_0028DDC0;
     if (xbox_va == 0x0015FF70) return traced_sub_0015FF70;
     if (xbox_va == 0x001602D0) return traced_sub_001602D0;

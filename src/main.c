@@ -329,18 +329,18 @@ static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
             return EXCEPTION_CONTINUE_SEARCH;
         }
 
-        fprintf(stderr, "[CRASH] Access violation at RIP=0x%llX, fault addr=0x%llX (%s)\n",
+        fprintf(stdout, "[CRASH] Access violation at RIP=0x%llX, fault addr=0x%llX (%s)\n",
             (unsigned long long)ep->ContextRecord->Rip,
             (unsigned long long)fault_addr,
             ep->ExceptionRecord->ExceptionInformation[0] ? "write" : "read");
-        fprintf(stderr, "  Module base: 0x%llX, RIP RVA: 0x%llX\n",
+        fprintf(stdout, "  Module base: 0x%llX, RIP RVA: 0x%llX\n",
             (unsigned long long)(uintptr_t)GetModuleHandleA(NULL),
             (unsigned long long)(ep->ContextRecord->Rip - (uintptr_t)GetModuleHandleA(NULL)));
-        fprintf(stderr, "  Xbox regs: eax=0x%08X ecx=0x%08X edx=0x%08X esp=0x%08X\n",
+        fprintf(stdout, "  Xbox regs: eax=0x%08X ecx=0x%08X edx=0x%08X esp=0x%08X\n",
             g_eax, g_ecx, g_edx, g_esp);
-        fprintf(stderr, "  Xbox regs: ebx=0x%08X esi=0x%08X edi=0x%08X\n",
+        fprintf(stdout, "  Xbox regs: ebx=0x%08X esi=0x%08X edi=0x%08X\n",
             g_ebx, g_esi, g_edi);
-        fprintf(stderr, "  Xbox VA of fault: 0x%08X\n",
+        fprintf(stdout, "  Xbox VA of fault: 0x%08X\n",
             (uint32_t)(fault_addr - (uintptr_t)g_xbox_mem_offset));
 
         /*
@@ -348,11 +348,11 @@ static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
          *
          * Dump CRT heap handle:
          *   uint32_t heap = *(uint32_t *)((uint8_t *)g_xbox_mem_offset + HEAP_HANDLE_VA);
-         *   fprintf(stderr, "  CRT heap handle: 0x%08X\n", heap);
+         *   fprintf(stdout, "  CRT heap handle: 0x%08X\n", heap);
          *
          * Dump game state:
          *   uint32_t state = *(uint32_t *)((uint8_t *)g_xbox_mem_offset + GAME_STATE_VA);
-         *   fprintf(stderr, "  Game state: %u\n", state);
+         *   fprintf(stdout, "  Game state: %u\n", state);
          */
 
         /* Print native stack return addresses for debugging */
@@ -363,20 +363,20 @@ static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
             for (USHORT frame = 0; frame < frame_count; ++frame) {
                 uintptr_t address = (uintptr_t)frames[frame];
                 if (address >= image_base && address < image_base + 0x10000000ULL)
-                    fprintf(stderr, "  [NATIVE-FRAME] %u RVA=%llX\n", frame,
+                    fprintf(stdout, "  [NATIVE-FRAME] %u RVA=%llX\n", frame,
                             (unsigned long long)(address - image_base));
             }
             uintptr_t *sp = (uintptr_t *)ep->ContextRecord->Rsp;
-            fprintf(stderr, "  Native stack (first 8 return addrs):\n");
+            fprintf(stdout, "  Native stack (first 8 return addrs):\n");
             for (int i = 0; i < 64 && sp[i]; i++) {
                 uintptr_t module_base = (uintptr_t)GetModuleHandleA(NULL);
                 if (sp[i] >= module_base && sp[i] < module_base + 0x10000000ULL) {
-                    fprintf(stderr, "    [%d] 0x%llX (RVA 0x%llX)\n", i,
+                    fprintf(stdout, "    [%d] 0x%llX (RVA 0x%llX)\n", i,
                         (unsigned long long)sp[i], (unsigned long long)(sp[i] - module_base));
                 }
             }
         }
-        fflush(stderr);
+        fflush(stdout);
     }
 
     return EXCEPTION_CONTINUE_SEARCH;
@@ -406,7 +406,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     /* Generated and manual bring-up diagnostics are verbose-only. Keeping
      * their formatting off the playable path prevents Bink decode from
      * falling behind its retail clock and skipping movie presentation. */
-    if (!g_dah2_verbose_trace) {
+    if (!g_dah2_verbose_trace && getenv("DAH2_INPUT_TRACE") == NULL) {
         FILE *quiet_stderr = NULL;
         freopen_s(&quiet_stderr, "NUL", "w", stderr);
     }

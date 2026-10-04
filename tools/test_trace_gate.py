@@ -18,9 +18,12 @@ def main() -> None:
     assert 'getenv("DAH2_QUIET_TRACE") == NULL' in source
     assert "#define fprintf(stream, ...) DAH2_TRACE_FPRINTF" in types
     assert main_c.index("dah2_trace_initialize();") < main_c.index(
-        "if (!g_dah2_verbose_trace)"
+        "if (!g_dah2_verbose_trace"
     )
-    assert "fprintf(stderr," not in manual
+    ordinary_manual = manual.split("/* DAH2_INPUT_REPLAY_BEGIN", 1)[0] + manual.split(
+        "/* DAH2_INPUT_REPLAY_END */", 1
+    )[1]
+    assert "fprintf(stderr," not in ordinary_manual
     assert "fprintf(stderr," not in bridge
     assert "if (g_dah2_verbose_trace)" in bridge
 
