@@ -1013,6 +1013,7 @@ static void traced_sub_0015FF70(void)
 {
     static volatile long s_call_count;
     uint32_t desc = *manual_mem32(g_esp + 4);
+    uint32_t manager = g_ecx;
     long n = InterlockedIncrement(&s_call_count);
     if (n <= 24) {
         fprintf(stderr, "[RESOURCE-LOAD] tid=%lu call #%ld desc=%08X ecx=%08X esp=%08X retsite=%08X\n",
@@ -1030,6 +1031,23 @@ static void traced_sub_0015FF70(void)
         }
     }
     sub_0015FF70();
+    if (n <= 24) {
+        uint32_t root = *manual_mem32(manager + 8);
+        uint32_t child = root ? *manual_mem32(root + 0x0C) : 0;
+        uint32_t grid = *manual_mem32(manager + 0x44);
+        fprintf(stderr,
+                "[RESOURCE-LOAD] return #%ld manager=%08X root=%08X child=%08X grid=%08X dims=%u,%u\n",
+                n, manager, root, child, grid,
+                grid ? *manual_mem32(grid + 8) : 0,
+                grid ? *manual_mem32(grid + 0x0C) : 0);
+        for (unsigned i = 0; child && i < 16; ++i) {
+            fprintf(stderr,
+                    "  scene-child[%u]=%08X parent=%08X child=%08X sibling=%08X payload=%08X\n",
+                    i, child, *manual_mem32(child + 8), *manual_mem32(child + 0x0C),
+                    *manual_mem32(child + 0x40), *manual_mem32(child + 0xE8));
+            child = *manual_mem32(child + 0x40);
+        }
+    }
 }
 
 /* TEMP: sub_001602D0 is a tiny vtable method (`MEM32(ecx+0x30) &= ~0x20;
@@ -2411,6 +2429,21 @@ extern __declspec(thread) double g_fp_stack[8];
 extern __declspec(thread) int g_fp_top;
 extern void sub_0013B550(void);
 
+/* Retail 0x001C6A27 is the x87 ceil helper used by sub_0013C410.
+ * The generated CRT body loses its x87 return on the ordinary finite-number
+ * path, so ceil(0.11547...) reaches sub_001C55FC as 0 instead of retail's 1.
+ * Preserve the cdecl stack contract and return the result in the shared x87
+ * stack model. */
+void sub_001C6A27(void)
+{
+    uint64_t bits = (uint64_t)MEM32(g_esp + 4)
+                  | ((uint64_t)MEM32(g_esp + 8) << 32);
+    double input;
+    memcpy(&input, &bits, sizeof(input));
+    g_fp_top = (g_fp_top + 7) & 7;
+    g_fp_stack[g_fp_top] = ceil(input);
+    g_esp += 4; /* ret; caller removes the 8-byte argument */
+}
 /* Full retail 0x0015CD50..0x0015CE8B projection update. The old generated
  * function stopped at 15CD9A, while its no-camera branch reached the empty
  * 15CDB6 stub. Both lost ESI/ESP and omitted the projection outputs, letting
@@ -3715,6 +3748,7 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
     if (xbox_va == 0x000C4C80) return traced_sub_000C4C80;
     if (xbox_va == 0x000F2720) return traced_sub_000F2720;
     if (xbox_va == 0x001C7FB9) return override_sub_001C7FB9;
+    if (xbox_va == 0x001C6A27) return sub_001C6A27;
     if (xbox_va == 0x000F78B0) return override_sub_000F78B0;
     if (xbox_va == 0x0008F860) return safe_sub_0008F860;
     if (xbox_va == 0x0003C080) return safe_sub_0003C080;

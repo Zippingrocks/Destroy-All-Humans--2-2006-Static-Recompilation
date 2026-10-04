@@ -226,6 +226,18 @@ static int pgraph_method_hist_enabled(void)
     return enabled;
 }
 
+static uint32_t pgraph_method_hist_limit(void)
+{
+    static uint32_t limit;
+    if (!limit) {
+        char value[16] = {0};
+        DWORD length = GetEnvironmentVariableA("DAH2_METHOD_HIST_LIMIT", value, sizeof(value));
+        unsigned long parsed = length && length < sizeof(value) ? strtoul(value, NULL, 10) : 1200;
+        limit = parsed >= 1 && parsed <= 100000 ? (uint32_t)parsed : 1200;
+    }
+    return limit;
+}
+
 /* Opt-in census for methods that fall through the Kelvin translator.  The
  * subchannel is essential here: DAH2 also feeds copy/upload engine objects
  * through the same push buffer, and treating their method numbers as Kelvin
@@ -784,7 +796,7 @@ void pgraph_d3d11_flush(void)
         g_pg.in_draw = 0;
     }
     g_pg.stats.frames++;
-    if (pgraph_method_hist_enabled() && frame <= 1200 &&
+    if (pgraph_method_hist_enabled() && frame <= pgraph_method_hist_limit() &&
         (g_pg_frame_methods.methods || (frame % 120) == 0)) {
         fprintf(stderr,
                 "[PGRAPH-FRAME-METHODS] frame=%u methods=%u begin=%u end=%u "

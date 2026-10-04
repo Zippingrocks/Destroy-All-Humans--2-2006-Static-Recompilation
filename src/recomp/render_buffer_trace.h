@@ -62,19 +62,24 @@ static void dah2_render_trace_state(uint32_t object) {
 }
 
 static Dah2RenderBufferTrace dah2_render_trace_begin(uint32_t object, int producer) {
-    static LONG locks, producers;
+    static LONG locks, producers, title_producers;
     Dah2RenderBufferTrace trace = {0};
     if (!dah2_render_trace_enabled()) return trace;
-    trace.ordinal = InterlockedIncrement(producer ? &producers : &locks);
-    if (trace.ordinal > (producer ? 12:4)) { trace.ordinal=0; return trace; }
+    uint32_t return_address = dah2_render_trace_word(g_esp);
+    int title_producer = producer &&
+        (return_address == 0x001A8290u || return_address == 0x001A8404u);
+    trace.ordinal = InterlockedIncrement(title_producer ? &title_producers : producer ? &producers : &locks);
+    if (trace.ordinal > (title_producer ? 32 : producer ? 12 : 4)) { trace.ordinal=0; return trace; }
     trace.object=object; trace.stack=g_esp;
     trace.vertex=dah2_render_trace_word(object+0x698);
     trace.index=dah2_render_trace_word(object+0x6A0);
     trace.input=dah2_render_trace_word(g_esp+4);
     trace.count=dah2_render_trace_word(g_esp+8);
     _lock_file(stderr);
-    fprintf(stderr,"[VERTEX-PRODUCER] {\"stage\":\"%s.entry\",\"ordinal\":%ld,\"object\":\"%08X\",\"esp\":\"%08X\",\"return\":\"%08X\",",
-            producer ? "170C30":"170B80",trace.ordinal,object,g_esp,dah2_render_trace_word(g_esp));
+    fprintf(stderr,"[VERTEX-PRODUCER] {\"stage\":\"%s.entry\",\"ordinal\":%ld,\"object\":\"%08X\",\"esp\":\"%08X\",\"return\":\"%08X\",\"title_mode\":\"%08X\",\"title_gate\":\"%08X\",\"title_primary\":\"%08X\",\"title_secondary\":\"%08X\",",
+            producer ? "170C30":"170B80",trace.ordinal,object,g_esp,return_address,
+            dah2_render_trace_word(0x31D9BC),dah2_render_trace_word(0x2EC0B8),
+            dah2_render_trace_word(0x31DA8C),dah2_render_trace_word(0x31DA90));
     dah2_render_trace_state(object);
     if (producer) {
         fprintf(stderr,",\"input\":\"%08X\",\"count\":%u,\"input_words\":",trace.input,trace.count);
