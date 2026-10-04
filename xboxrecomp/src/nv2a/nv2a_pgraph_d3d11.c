@@ -200,6 +200,31 @@ static struct {
     /* Init flag */
     int initialized;
 } g_pg;
+/* Opt-in, bounded per-present command summary used to distinguish a missing
+ * guest scene stream from renderer-side draw rejection. */
+static struct {
+    uint32_t methods;
+    uint32_t begins;
+    uint32_t ends;
+    uint32_t begin_modes[11];
+    uint32_t element16_words;
+    uint32_t element32_words;
+    uint32_t draw_arrays_words;
+    uint32_t draw_arrays_vertices;
+    uint32_t inline_words;
+    uint32_t clears;
+} g_pg_frame_methods;
+
+static int pgraph_method_hist_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        char flag[8];
+        DWORD length = GetEnvironmentVariableA("DAH2_METHOD_HIST", flag, sizeof(flag));
+        enabled = length == 1 && flag[0] == '1';
+    }
+    return enabled;
+}
 
 /* Opt-in census for methods that fall through the Kelvin translator.  The
  * subchannel is essential here: DAH2 also feeds copy/upload engine objects
@@ -525,6 +550,27 @@ int pgraph_d3d11_method(int subchannel, uint32_t method, uint32_t param)
         return 0;
 
     pgraph_parity_method(method, param);
+    if (pgraph_method_hist_enabled()) {
+        g_pg_frame_methods.methods++;
+        if (method == NV097_SET_BEGIN_END) {
+            if (param == 0) g_pg_frame_methods.ends++;
+            else {
+                g_pg_frame_methods.begins++;
+                if (param < 11) g_pg_frame_methods.begin_modes[param]++;
+            }
+        } else if (method == NV097_ARRAY_ELEMENT16) {
+            g_pg_frame_methods.element16_words++;
+        } else if (method == NV097_ARRAY_ELEMENT32) {
+            g_pg_frame_methods.element32_words++;
+        } else if (method == NV097_DRAW_ARRAYS) {
+            g_pg_frame_methods.draw_arrays_words++;
+            g_pg_frame_methods.draw_arrays_vertices += (param >> 24) + 1;
+        } else if (method == NV097_INLINE_ARRAY) {
+            g_pg_frame_methods.inline_words++;
+        } else if (method == NV097_CLEAR_SURFACE) {
+            g_pg_frame_methods.clears++;
+        }
+    }
 
     /* Emit one sample for every method the authentic guest submits.  This is
      * intentionally bounded to the 2 KiB NV2A method space, so it gives us a
@@ -732,13 +778,33 @@ int pgraph_d3d11_method(int subchannel, uint32_t method, uint32_t param)
 
 void pgraph_d3d11_flush(void)
 {
+    uint32_t frame = g_pg.stats.frames + 1;
     if (g_pg.in_draw) {
         submit_draw();
         g_pg.in_draw = 0;
     }
     g_pg.stats.frames++;
+    if (pgraph_method_hist_enabled() && frame <= 1200 &&
+        (g_pg_frame_methods.methods || (frame % 120) == 0)) {
+        fprintf(stderr,
+                "[PGRAPH-FRAME-METHODS] frame=%u methods=%u begin=%u end=%u "
+                "modes=%u/%u/%u/%u/%u/%u/%u/%u/%u/%u "
+                "ae16=%u ae32=%u arrays=%u/%u inline=%u clears=%u "
+                "draws_total=%u rejected_total=%u\n",
+                frame, g_pg_frame_methods.methods, g_pg_frame_methods.begins,
+                g_pg_frame_methods.ends,
+                g_pg_frame_methods.begin_modes[1], g_pg_frame_methods.begin_modes[2],
+                g_pg_frame_methods.begin_modes[3], g_pg_frame_methods.begin_modes[4],
+                g_pg_frame_methods.begin_modes[5], g_pg_frame_methods.begin_modes[6],
+                g_pg_frame_methods.begin_modes[7], g_pg_frame_methods.begin_modes[8],
+                g_pg_frame_methods.begin_modes[9], g_pg_frame_methods.begin_modes[10],
+                g_pg_frame_methods.element16_words, g_pg_frame_methods.element32_words,
+                g_pg_frame_methods.draw_arrays_words, g_pg_frame_methods.draw_arrays_vertices,
+                g_pg_frame_methods.inline_words, g_pg_frame_methods.clears,
+                g_pg.stats.draw_calls, g_pg.stats.rejected_draws);
+    }
+    memset(&g_pg_frame_methods, 0, sizeof(g_pg_frame_methods));
 }
-
 void pgraph_d3d11_set_chyron_scroll(uint32_t pixels)
 {
     g_pg.chyron_scroll_offset = (float)pixels;

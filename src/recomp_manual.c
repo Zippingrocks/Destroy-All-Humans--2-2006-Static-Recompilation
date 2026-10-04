@@ -2033,7 +2033,17 @@ loc_000F7D5C_b:
     /* loc_000F7D75 */
     g_esp -= 4; *manual_mem32(g_esp) = g_edi;
     g_ecx = g_esi;
-    F7C50_CALL(sub_001150B0, 0x000F7D7Du);
+    {
+        uint32_t call_sp = g_esp;
+        uint32_t protect_esi = g_esi, protect_edi = g_edi, protect_ebx = g_ebx;
+        F7C50_CALL(sub_001150B0, 0x000F7D7Du);
+        /* sub_001150B0 is another translator-split function. Its damaged
+         * descendant path intermittently returns 0x30 bytes below the retail
+         * stdcall boundary and leaves ESI pointing into its scratch frame.
+         * Retail consumes the one argument and preserves nonvolatile regs. */
+        g_esp = call_sp + 4;
+        g_esi = protect_esi; g_edi = protect_edi; g_ebx = protect_ebx;
+    }
 
     /* loc_000F7D7D */
     g_ecx = *manual_mem32(0x307310);
