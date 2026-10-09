@@ -44,6 +44,7 @@ game_saves/
 # Local parity captures, emulator instances, and extracted/generated analysis
 diagnostics/
 xemu_private/
+.reference_xemu/
 xboxrecomp/tools/*/output/
 tools/extract-xiso-build*/
 assets/dah2_menu_reference.bmp

@@ -66,6 +66,169 @@ static __forceinline uint32_t *manual_mem32(uint32_t va)
     return (uint32_t *)((uintptr_t)g_xbox_mem_offset + va);
 }
 
+volatile uint32_t g_dah2_natalia_x_access_sequence;
+volatile uint32_t g_dah2_natalia_x_access_ring[256][8];
+volatile uint32_t g_dah2_timing_link_access_sequence;
+volatile uint32_t g_dah2_timing_link_access_ring[64][16];
+volatile uint32_t g_dah2_anim_sampler_sequence;
+volatile uint32_t g_dah2_anim_sampler_ring[256][16];
+volatile uint32_t g_dah2_anim_event_sequence;
+volatile uint32_t g_dah2_anim_event_ring[256][8];
+volatile uint32_t g_dah2_resolver_probe[24];
+
+static uint32_t dah2_function_va(const char *function)
+{
+    uint32_t value = 0;
+    const char *cursor = function;
+    while (cursor && *cursor && *cursor != '_')
+        ++cursor;
+    if (!cursor || cursor[0] != '_' || cursor[1] != '0' || cursor[2] != '0')
+        return 0;
+    cursor += 1;
+    for (unsigned i = 0; i < 8; ++i) {
+        char ch = cursor[i];
+        unsigned nibble;
+        if (ch >= '0' && ch <= '9') nibble = (unsigned)(ch - '0');
+        else if (ch >= 'A' && ch <= 'F') nibble = (unsigned)(ch - 'A' + 10);
+        else if (ch >= 'a' && ch <= 'f') nibble = (unsigned)(ch - 'a' + 10);
+        else return 0;
+        value = (value << 4) | nibble;
+    }
+    return value;
+}
+
+void dah2_watch_natalia_x_access(uint32_t addr, const char *function, int line)
+{
+    static __declspec(thread) uint32_t previous_value;
+    static __declspec(thread) uint32_t previous_function;
+    static __declspec(thread) uint32_t previous_line;
+    static __declspec(thread) int initialized;
+    uint32_t current_value = *manual_mem32(addr);
+    uint32_t function_va = dah2_function_va(function);
+
+    if (initialized && current_value != previous_value) {
+        uint32_t sequence = g_dah2_natalia_x_access_sequence++;
+        volatile uint32_t *sample = g_dah2_natalia_x_access_ring[sequence & 255u];
+        sample[0] = sequence;
+        sample[1] = addr;
+        sample[2] = previous_value;
+        sample[3] = current_value;
+        sample[4] = previous_function;
+        sample[5] = previous_line;
+        sample[6] = function_va;
+        sample[7] = (uint32_t)line;
+    }
+    previous_value = current_value;
+    previous_function = function_va;
+    previous_line = (uint32_t)line;
+    initialized = 1;
+}
+
+/* Diagnostic only: this fixed node is the verified retail memory service's
+ * forward timing link (MEM32(2C9640)+18=30FE98). Observes MEM32 lvalue access,
+ * never the guest write itself: a native bulk copy can bypass this hook, so
+ * the previous source location is evidence of the last generated access,
+ * not proof of the writer until that source is checked. Enable only with
+ * DAH2_TIMING_LINK_WATCH=1 and DAH2_TEST_WINDOW_HIDDEN=1. No guest changes. */
+void dah2_watch_timing_link_access(uint32_t addr, const char *function, int line)
+{
+    static int enabled = -1;
+    static __declspec(thread) uint32_t previous_value;
+    static __declspec(thread) uint32_t previous_function;
+    static __declspec(thread) uint32_t previous_line;
+    static __declspec(thread) uint32_t previous_registers[6];
+    static __declspec(thread) int initialized;
+    uint32_t current_value;
+    uint32_t function_va;
+
+    if (enabled < 0) {
+        const char *requested = getenv("DAH2_TIMING_LINK_WATCH");
+        const char *hidden = getenv("DAH2_TEST_WINDOW_HIDDEN");
+        enabled = requested && strcmp(requested, "1") == 0 &&
+                  hidden && strcmp(hidden, "1") == 0;
+    }
+    if (!enabled || addr != 0x0030FE98u)
+        return;
+    current_value = *manual_mem32(addr);
+    function_va = dah2_function_va(function);
+    if (initialized && current_value != previous_value) {
+        uint32_t sequence = (uint32_t)InterlockedIncrement(
+            (volatile LONG *)&g_dah2_timing_link_access_sequence) - 1u;
+        volatile uint32_t *sample = g_dah2_timing_link_access_ring[sequence & 63u];
+        sample[0] = sequence;
+        sample[1] = addr;
+        sample[2] = previous_value;
+        sample[3] = current_value;
+        sample[4] = previous_function;
+        sample[5] = previous_line;
+        sample[6] = function_va;
+        sample[7] = (uint32_t)line;
+        for (unsigned i = 0; i < 6; ++i)
+            sample[8u + i] = previous_registers[i];
+        sample[14] = GetCurrentThreadId();
+        sample[15] = sequence + 1u;
+        if (sequence < 64u) {
+            fprintf(stdout,
+                    "[TIMING-LINK-WATCH] #%u addr=%08X old=%08X new=%08X previous=%08X:%u observed=%08X:%u eax=%08X ecx=%08X edx=%08X esi=%08X edi=%08X esp=%08X thread=%u\n",
+                    sequence, addr, previous_value, current_value,
+                    previous_function, previous_line, function_va, (uint32_t)line,
+                    previous_registers[0], previous_registers[1], previous_registers[2],
+                    previous_registers[3], previous_registers[4], previous_registers[5],
+                    (unsigned)sample[14]);
+        }
+    }
+    previous_value = current_value;
+    previous_function = function_va;
+    previous_line = (uint32_t)line;
+    previous_registers[0] = g_eax;
+    previous_registers[1] = g_ecx;
+    previous_registers[2] = g_edx;
+    previous_registers[3] = g_esi;
+    previous_registers[4] = g_edi;
+    previous_registers[5] = g_esp;
+    initialized = 1;
+}
+
+void dah2_probe_anim_sampler(uint32_t stage, uint32_t sampler, uint32_t target,
+                            uint32_t time, uint32_t cursor, uint32_t icall_target)
+{
+    if (target == 0x858E96E0u) {
+        uint32_t sequence = g_dah2_anim_sampler_sequence++;
+        volatile uint32_t *sample = g_dah2_anim_sampler_ring[sequence & 255u];
+        sample[0] = sequence;
+        sample[1] = stage;
+        sample[2] = sampler;
+        sample[3] = target;
+        sample[4] = time;
+        sample[5] = cursor;
+        sample[6] = sampler ? *manual_mem32(sampler + 8) : 0;
+        sample[7] = target ? *manual_mem32(target) : 0;
+        sample[8] = icall_target;
+        sample[9] = target ? *manual_mem32(target + 0x10) : 0;
+        sample[10] = g_esp;
+        sample[11] = g_eax;
+        sample[12] = g_ecx;
+        sample[13] = g_edx;
+        sample[14] = g_esi;
+        sample[15] = g_edi;
+    }
+}
+void dah2_probe_anim_event(uint32_t stage, uint32_t object, uint32_t delta,
+                          uint32_t auxiliary)
+{
+    if (stage == 0 || object == 0x8585C6C0u) {
+        uint32_t sequence = g_dah2_anim_event_sequence++;
+        volatile uint32_t *sample = g_dah2_anim_event_ring[sequence & 255u];
+        sample[0] = sequence;
+        sample[1] = stage;
+        sample[2] = object;
+        sample[3] = delta;
+        sample[4] = auxiliary;
+        sample[5] = g_esp;
+        sample[6] = object;
+        sample[7] = stage == 1 ? *manual_mem32(object + 0xC4) : 0;
+    }
+}
 static __forceinline uint8_t *manual_mem8(uint32_t va)
 {
     return (uint8_t *)((uintptr_t)g_xbox_mem_offset + va);
@@ -608,16 +771,281 @@ void recomp_icall_fail_log(uint32_t va);  /* defined later in this file */
  * sub_002180E0, ICALL against garbage VA 0x00100000).
  *
  * Full replacement via /FORCE:MULTIPLE; sub_002115F0 is called unmodified,
- * exactly as retail does. Only the SCRIPT-CALL indirect dispatch is
- * hardened with esi/edi/ebx save-restore. */
+ * exactly as retail does. The two guest-stack saves below are essential ABI,
+ * not merely register preservation: callbacks observe the saved caller EDI as
+ * their first stack argument. Omitting those pushes made sub_001A8EB0 receive
+ * this dispatcher's outer return address instead of its resource pointer. */
 extern void sub_002115F0(void);
 extern __declspec(thread) uint32_t g_dah2_lua_context_hint;
+volatile uint32_t g_dah2_script_callback_calls;
+volatile uint32_t g_dah2_script_callback_trace[8192][12];
+extern volatile uint32_t g_dah2_object_loader_calls;
+volatile uint32_t g_dah2_postloader_stack_calls;
+volatile uint32_t g_dah2_parent_frame_probe_address;
+volatile uint32_t g_dah2_input_shell_parent_reentries;
+volatile uint32_t g_dah2_postloader_stack_esp[512];
+volatile uint32_t g_dah2_postloader_stack_target[512];
+extern volatile uint64_t g_dah2_present_timing_samples;
+volatile uint32_t g_dah2_postloader_present_trace[512];
+volatile uint32_t g_dah2_postloader_stack_trace[512][256];
+volatile uint32_t g_dah2_postloader_proto_trace[512][8];
+volatile uint32_t g_dah2_postloader_source_words[512][32];
+volatile uint32_t g_dah2_postloader_lua_stack_trace[512][32];
+volatile uint32_t g_dah2_postloader_lua_below_top_trace[512][32];
+volatile uint32_t g_dah2_vm_after_callback6_calls;
+volatile uint32_t g_dah2_vm_after_callback6_trace[2048][16];
+volatile uint32_t g_dah2_vm_native_trace_calls;
+volatile uint32_t g_dah2_vm_native_trace[8192][12];
+__declspec(thread) uint32_t g_dah2_vm_native_depth;
+__declspec(thread) uint32_t g_dah2_vm_native_function_stack[64];
+volatile uint32_t g_dah2_return_landmark_calls;
+volatile uint32_t g_dah2_return_landmark_trace[128][9];
+volatile uint32_t g_dah2_scheduler_queue_trace_calls;
+volatile uint32_t g_dah2_scheduler_queue_trace[2048][24];
+volatile uint32_t g_dah2_dispatch_queue_trace_calls;
+volatile uint32_t g_dah2_dispatch_queue_trace[1024][24];
+volatile uint32_t g_dah2_166b50_trace_calls;
+volatile uint32_t g_dah2_166b50_trace[256][20];
+volatile uint32_t g_dah2_166b50_object_words[64];
+volatile uint32_t g_dah2_dispatch_event_trace_calls;
+volatile uint32_t g_dah2_dispatch_event_trace[256][20];
+volatile uint32_t g_dah2_completion_trace_calls;
+volatile uint32_t g_dah2_completion_trace[256][16];
+
+void dah2_completion_trace_capture(uint32_t stage, uint32_t object,
+                                   uint32_t guest_sp, uint32_t value_eax,
+                                   uint32_t value_ebx, uint32_t value_ecx,
+                                   uint32_t value_edx, uint32_t value_esi,
+                                   uint32_t value_edi)
+{
+    if (g_dah2_object_loader_calls > 0u &&
+        g_dah2_postloader_stack_calls >= 6u &&
+        g_dah2_postloader_stack_calls <= 32u) {
+        uint32_t slot = g_dah2_completion_trace_calls++;
+        if (slot < 256u) {
+            volatile uint32_t *row = g_dah2_completion_trace[slot];
+            row[0] = stage; row[1] = g_dah2_postloader_stack_calls;
+            row[2] = g_dah2_script_callback_calls; row[3] = object;
+            row[4] = guest_sp; row[5] = value_eax; row[6] = value_ebx;
+            row[7] = value_ecx; row[8] = value_edx;
+            row[9] = value_esi; row[10] = value_edi;
+            row[11] = *manual_mem32(guest_sp); row[12] = *manual_mem32(guest_sp + 4u);
+            row[13] = *manual_mem32(guest_sp + 8u); row[14] = *manual_mem32(guest_sp + 0xCu);
+            row[15] = *manual_mem32(guest_sp + 0x10u);
+        }
+    }
+}
+
+void dah2_dispatch_event_trace_capture(uint32_t stage, uint32_t event,
+                                       uint32_t code, uint32_t guest_sp,
+                                       uint32_t value_eax, uint32_t value_ecx,
+                                       uint32_t value_edx)
+{
+    if (g_dah2_object_loader_calls > 0u &&
+        g_dah2_postloader_stack_calls >= 6u &&
+        g_dah2_postloader_stack_calls <= 32u) {
+        uint32_t slot = g_dah2_dispatch_event_trace_calls++;
+        if (slot < 256u) {
+            volatile uint32_t *row = g_dah2_dispatch_event_trace[slot];
+            uint32_t vtable = event ? *manual_mem32(event) : 0u;
+            row[0] = stage; row[1] = g_dah2_postloader_stack_calls;
+            row[2] = g_dah2_script_callback_calls; row[3] = event;
+            row[4] = code; row[5] = vtable;
+            row[6] = vtable ? *manual_mem32(vtable + 0x10u) : 0u;
+            row[7] = vtable ? *manual_mem32(vtable + 0x14u) : 0u;
+            row[8] = vtable ? *manual_mem32(vtable + 0x18u) : 0u;
+            row[9] = event ? *manual_mem32(event + 0x3Cu) : 0u;
+            row[10] = event ? *manual_mem32(event + 0xA0u) : 0u;
+            row[11] = event ? *manual_mem32(event + 0xA4u) : 0u;
+            row[12] = guest_sp; row[13] = value_eax;
+            row[14] = value_ecx; row[15] = value_edx;
+            row[16] = *manual_mem32(guest_sp); row[17] = *manual_mem32(guest_sp + 4u);
+            row[18] = *manual_mem32(guest_sp + 8u); row[19] = *manual_mem32(guest_sp + 0xCu);
+        }
+    }
+}
+
+void dah2_166b50_trace_capture(uint32_t stage, uint32_t object,
+                               uint32_t guest_sp, uint32_t value_eax,
+                               uint32_t value_ebx, uint32_t value_ecx,
+                               uint32_t value_edx, uint32_t value_edi)
+{
+    if (g_dah2_object_loader_calls > 0u &&
+        g_dah2_postloader_stack_calls >= 6u &&
+        g_dah2_postloader_stack_calls <= 32u) {
+        uint32_t slot = g_dah2_166b50_trace_calls++;
+        if (slot < 256u) {
+            volatile uint32_t *row = g_dah2_166b50_trace[slot];
+            row[0] = stage; row[1] = g_dah2_postloader_stack_calls;
+            row[2] = g_dah2_script_callback_calls; row[3] = object;
+            row[4] = guest_sp; row[5] = value_eax; row[6] = value_ebx;
+            row[7] = value_ecx; row[8] = value_edx; row[9] = value_edi;
+            row[10] = object ? *manual_mem32(object) : 0u;
+            row[11] = object ? *manual_mem32(object + 4u) : 0u;
+            row[12] = object ? *manual_mem32(object + 8u) : 0u;
+            row[13] = object ? *manual_mem32(object + 0xC4u) : 0u;
+            row[14] = object ? *manual_mem32(object + 0xC8u) : 0u;
+            row[15] = object ? *manual_mem32(object + 0xCCu) : 0u;
+            row[16] = object ? *manual_mem32(object + 0xD0u) : 0u;
+            row[17] = object ? *manual_mem32(object + 0xD4u) : 0u;
+            row[18] = *manual_mem32(guest_sp); row[19] = *manual_mem32(guest_sp + 4u);
+            if (stage == 0x00166B50u && slot == 0u) {
+                uint32_t i;
+                for (i = 0u; i < 64u; ++i)
+                    g_dah2_166b50_object_words[i] = *manual_mem32(object + i * 4u);
+            }
+        }
+    }
+}
+
+void dah2_dispatch_queue_trace_capture(uint32_t queue, uint32_t guest_sp)
+{
+    uint32_t node, count, ordinal;
+    if (g_dah2_object_loader_calls == 0u || g_dah2_postloader_stack_calls > 32u)
+        return;
+    node = *manual_mem32(queue);
+    count = *manual_mem32(queue + 0x20u);
+    for (ordinal = 0u; ordinal <= count && ordinal < 17u; ++ordinal) {
+        uint32_t slot = g_dah2_dispatch_queue_trace_calls++;
+        uint32_t event = ordinal ? *manual_mem32(node + 8u) : 0u;
+        uint32_t vtable = event ? *manual_mem32(event) : 0u;
+        if (slot < 1024u) {
+            volatile uint32_t *row = g_dah2_dispatch_queue_trace[slot];
+            row[0] = ordinal ? 2u : 1u; row[1] = g_dah2_postloader_stack_calls;
+            row[2] = queue; row[3] = *manual_mem32(queue);
+            row[4] = *manual_mem32(queue + 8u); row[5] = *manual_mem32(queue + 0x1Cu);
+            row[6] = *manual_mem32(queue + 0x20u); row[7] = node;
+            row[8] = event; row[9] = vtable;
+            row[10] = vtable ? *manual_mem32(vtable + 0x10u) : 0u;
+            row[11] = vtable ? *manual_mem32(vtable + 0x14u) : 0u;
+            row[12] = vtable ? *manual_mem32(vtable + 0x18u) : 0u;
+            row[13] = event ? *manual_mem32(event + 0x3Cu) : 0u;
+            row[14] = event ? *manual_mem32(event + 0xA0u) : 0u;
+            row[15] = ordinal ? *manual_mem32(node + 8u) : 0u;
+            row[16] = ordinal ? *manual_mem32(node + 0xCu) : 0u;
+            row[17] = ordinal ? *manual_mem32(node + 0x10u) : 0u;
+            row[18] = ordinal ? *manual_mem32(node + 0x14u) : 0u;
+            row[19] = ordinal ? *manual_mem32(node + 0x18u) : 0u;
+            row[20] = g_dah2_script_callback_calls; row[21] = guest_sp;
+            row[22] = g_eax; row[23] = g_ecx;
+        }
+        if (ordinal) node = *manual_mem32(node);
+    }
+}
+
+void dah2_scheduler_queue_trace_capture(uint32_t kind, uint32_t queue,
+                                        uint32_t node, uint32_t event,
+                                        uint32_t guest_sp)
+{
+    if (g_dah2_object_loader_calls > 0u && g_dah2_postloader_stack_calls <= 32u) {
+        uint32_t slot = g_dah2_scheduler_queue_trace_calls++;
+        if (slot < 2048u) {
+            volatile uint32_t *row = g_dah2_scheduler_queue_trace[slot];
+            uint32_t vtable = event ? *manual_mem32(event) : 0u;
+            row[0] = kind;
+            row[1] = g_dah2_postloader_stack_calls;
+            row[2] = queue;
+            row[3] = queue ? *manual_mem32(queue) : 0u;
+            row[4] = queue ? *manual_mem32(queue + 8u) : 0u;
+            row[5] = queue ? *manual_mem32(queue + 0x1Cu) : 0u;
+            row[6] = queue ? *manual_mem32(queue + 0x20u) : 0u;
+            row[7] = node;
+            row[8] = event;
+            row[9] = vtable;
+            row[10] = vtable ? *manual_mem32(vtable + 0x10u) : 0u;
+            row[11] = guest_sp;
+            row[12] = node ? *manual_mem32(node) : 0u;
+            row[13] = node ? *manual_mem32(node + 4u) : 0u;
+            row[14] = node ? *manual_mem32(node + 8u) : 0u;
+            row[15] = node ? *manual_mem32(node + 0xCu) : 0u;
+            row[16] = node ? *manual_mem32(node + 0x10u) : 0u;
+            row[17] = node ? *manual_mem32(node + 0x14u) : 0u;
+            row[18] = node ? *manual_mem32(node + 0x18u) : 0u;
+            row[19] = g_eax; row[20] = g_ecx; row[21] = g_edx;
+            row[22] = g_ebx; row[23] = g_ebp;
+        }
+    }
+}
+
+void dah2_vm_native_trace_enter(uint32_t function, uint32_t closure,
+                                uint32_t state, uint32_t entry_sp)
+{
+    uint32_t depth = g_dah2_vm_native_depth;
+    uint32_t parent = depth ? g_dah2_vm_native_function_stack[depth - 1u] : 0u;
+    if (g_dah2_object_loader_calls > 0u) {
+        uint32_t slot = g_dah2_vm_native_trace_calls++;
+        if (slot < 8192u) {
+            volatile uint32_t *row = g_dah2_vm_native_trace[slot];
+            row[0] = 1u;
+            row[1] = g_dah2_postloader_stack_calls;
+            row[2] = depth;
+            row[3] = function;
+            row[4] = parent;
+            row[5] = entry_sp;
+            row[6] = *manual_mem32(entry_sp);
+            row[7] = closure;
+            row[8] = state;
+            row[9] = *manual_mem32(function + 0x18u);
+            row[10] = *manual_mem32(function + 0x40u);
+            row[11] = *manual_mem32(state);
+        }
+    }
+    if (depth < 64u) {
+        g_dah2_vm_native_function_stack[depth] = function;
+        g_dah2_vm_native_depth = depth + 1u;
+    }
+}
+
+void dah2_vm_native_trace_exit(uint32_t kind, uint32_t function,
+                               uint32_t exit_sp)
+{
+    uint32_t depth = g_dah2_vm_native_depth;
+    uint32_t current = depth ? g_dah2_vm_native_function_stack[depth - 1u] : 0u;
+    uint32_t parent = depth > 1u ? g_dah2_vm_native_function_stack[depth - 2u] : 0u;
+    if (g_dah2_object_loader_calls > 0u) {
+        uint32_t slot = g_dah2_vm_native_trace_calls++;
+        if (slot < 8192u) {
+            volatile uint32_t *row = g_dah2_vm_native_trace[slot];
+            row[0] = 0x80000000u | kind;
+            row[1] = g_dah2_postloader_stack_calls;
+            row[2] = depth;
+            row[3] = function;
+            row[4] = current;
+            row[5] = parent;
+            row[6] = exit_sp;
+            row[7] = g_eax;
+            row[8] = g_ecx;
+            row[9] = g_edx;
+            row[10] = g_esp;
+            row[11] = g_ebp;
+        }
+    }
+    if (depth)
+        g_dah2_vm_native_depth = depth - 1u;
+}
+
+static void dah2_capture_15eca0_stage(uint32_t stage, uint32_t aux);
+static void dah2_capture_f7c50_stage(uint32_t stage, uint32_t guest_ebp)
+{
+    if (g_dah2_postloader_stack_calls >= 6u) {
+        uint32_t slot = g_dah2_return_landmark_calls++;
+        if (slot < 128u) {
+            volatile uint32_t *row = g_dah2_return_landmark_trace[slot];
+            row[0]=stage; row[1]=g_dah2_postloader_stack_calls; row[2]=g_eax;
+            row[3]=g_ecx; row[4]=g_edx; row[5]=g_ebx; row[6]=g_esp;
+            row[7]=guest_ebp; row[8]=g_esi;
+        }
+    }
+}
 
 void sub_002117C0(void)
 {
     static uint32_t callback_1018_count;
-    uint32_t saved_edi = g_edi;
+    /* Retail 0x2117C0: push ebp; ebp=[esi+10]; push edi. Keep the exact
+     * guest-stack layout because callback arguments alias these saved slots. */
+    g_esp -= 4; *manual_mem32(g_esp) = g_ebp;
     uint32_t scratch_ebp = *manual_mem32(g_esi + 0x10);  /* retail: ebp = MEM32(esi+0x10) */
+    g_esp -= 4; *manual_mem32(g_esp) = g_edi;
 
     g_edi = (uint32_t)(int32_t)(int16_t)(*(volatile uint16_t *)manual_mem8(g_ebx + 0xE));
     g_edx = g_edi + 0x14;
@@ -627,14 +1055,17 @@ void sub_002117C0(void)
     sub_002115F0();
 
     if ((int32_t)g_edi > 0) {
-        uint32_t src = g_ebx + 0x10;
+        g_eax = g_ebx + 0x10;
         while (g_edi != 0) {
-            uint32_t dst = *manual_mem32(g_esi);
-            *manual_mem32(dst)     = *manual_mem32(src);
-            *manual_mem32(dst + 4) = *manual_mem32(src + 4);
-            *manual_mem32(g_esi) = dst + 8;
-            src += 8;
+            g_edx = *manual_mem32(g_eax);
+            g_ecx = *manual_mem32(g_esi);
+            *manual_mem32(g_ecx) = g_edx;
+            g_edx = *manual_mem32(g_eax + 4);
+            *manual_mem32(g_ecx + 4) = g_edx;
+            g_ecx = *manual_mem32(g_esi) + 8;
+            g_eax += 8;
             g_edi--;
+            *manual_mem32(g_esi) = g_ecx;
         }
     }
 
@@ -648,6 +1079,85 @@ void sub_002117C0(void)
         uint32_t protect_esi = g_esi, protect_ebx = g_ebx;
         uint32_t icall_esp = g_esp;
         uint32_t icall_target = *manual_mem32(g_ebx);
+        uint32_t trace_slot = g_dah2_script_callback_calls++;
+        if (trace_slot < 8192u) {
+            g_dah2_script_callback_trace[trace_slot][0] = icall_target;
+            g_dah2_script_callback_trace[trace_slot][1] = *manual_mem32(icall_esp + 8u);
+            g_dah2_script_callback_trace[trace_slot][2] = g_esi;
+            g_dah2_script_callback_trace[trace_slot][3] = *manual_mem32(g_esi + 0u);
+            g_dah2_script_callback_trace[trace_slot][4] = *manual_mem32(g_esi + 4u);
+            g_dah2_script_callback_trace[trace_slot][5] = *manual_mem32(g_esi + 8u);
+            g_dah2_script_callback_trace[trace_slot][6] = g_ebx;
+            g_dah2_script_callback_trace[trace_slot][7] =
+                (uint32_t)(int32_t)(int16_t)(*(volatile uint16_t *)manual_mem8(g_ebx + 0xEu));
+        }
+        if (g_dah2_object_loader_calls > 0u) {
+            uint32_t stack_slot = g_dah2_postloader_stack_calls++;
+            if (stack_slot < 512u) {
+                g_dah2_postloader_stack_esp[stack_slot] = g_esp;
+                g_dah2_postloader_stack_target[stack_slot] = icall_target;
+                g_dah2_postloader_present_trace[stack_slot] =
+                    (uint32_t)g_dah2_present_timing_samples;
+                if (stack_slot == 0u)
+                    g_dah2_parent_frame_probe_address = g_esp + 0x118u;
+                for (uint32_t i = 0; i < 256u; ++i)
+                    g_dah2_postloader_stack_trace[stack_slot][i] = *manual_mem32(g_esp + i * 4u);
+                {
+                    uint32_t top = *manual_mem32(g_esi);
+                    for (uint32_t i = 0; i < 32u; ++i)
+                        g_dah2_postloader_lua_stack_trace[stack_slot][i] =
+                            *manual_mem32(top - 64u + i * 4u);
+                    for (uint32_t i = 0; i < 32u; ++i)
+                        g_dah2_postloader_lua_below_top_trace[stack_slot][i] =
+                            *manual_mem32(top - 128u + i * 4u);
+                }
+                /* Resolve the active Lua Proto while the callback frame is
+                 * still live. These heap objects are aggressively recycled,
+                 * so resolving a copied stack later can yield false matches. */
+                for (uint32_t i = 2u; i < 256u; ++i) {
+                    uint32_t function = g_dah2_postloader_stack_trace[stack_slot][i];
+                    if (function < 0x80000000u || function >= 0x90000000u)
+                        continue;
+                    uint32_t f08 = *manual_mem32(function + 0x08u);
+                    uint32_t pc = g_dah2_postloader_stack_trace[stack_slot][i - 2u];
+                    uint32_t code = *manual_mem32(function + 0x18u);
+                    uint32_t code_count = *manual_mem32(function + 0x1Cu);
+                    uint32_t code_end = code + (code_count ? code_count * 4u : 4u);
+                    if (g_dah2_postloader_stack_trace[stack_slot][i - 1u] != f08 ||
+                        pc < code || pc > code_end)
+                        continue;
+                    uint32_t source_object = *manual_mem32(function + 0x40u);
+                    if (source_object < 0x80000000u || source_object >= 0x90000000u)
+                        continue;
+                    uint8_t first = *manual_mem8(source_object + 20u);
+                    if (first < 0x20u || first > 0x7Eu)
+                        continue;
+                    g_dah2_postloader_proto_trace[stack_slot][0] = i;
+                    g_dah2_postloader_proto_trace[stack_slot][1] = function;
+                    g_dah2_postloader_proto_trace[stack_slot][2] = pc;
+                    g_dah2_postloader_proto_trace[stack_slot][3] = f08;
+                    g_dah2_postloader_proto_trace[stack_slot][4] = code;
+                    g_dah2_postloader_proto_trace[stack_slot][5] = code_count;
+                    g_dah2_postloader_proto_trace[stack_slot][6] = source_object;
+                    for (uint32_t word = 0u; word < 32u; ++word) {
+                        uint32_t packed = 0u;
+                        for (uint32_t byte = 0u; byte < 4u; ++byte) {
+                            uint8_t ch = *manual_mem8(source_object + 20u + word * 4u + byte);
+                            packed |= (uint32_t)ch << (byte * 8u);
+                            if (ch == 0u)
+                                break;
+                        }
+                        g_dah2_postloader_source_words[stack_slot][word] = packed;
+                        if ((packed & 0xFF000000u) == 0u ||
+                            (packed & 0x00FF0000u) == 0u ||
+                            (packed & 0x0000FF00u) == 0u ||
+                            (packed & 0x000000FFu) == 0u)
+                            break;
+                    }
+                    break;
+                }
+            }
+        }
         uint32_t callback_ordinal = 0;
         if (icall_target == 0x001018D0u) callback_ordinal = ++callback_1018_count;
         if (icall_target == 0x001018D0u || icall_target == 0x00124DC0u) {
@@ -703,6 +1213,12 @@ void sub_002117C0(void)
         if (!fn) fn = recomp_lookup(icall_target);
         if (fn) fn();
         else { recomp_icall_fail_log(icall_target); g_esp = icall_esp; g_eax = 0; }
+        if (trace_slot < 8192u) {
+            g_dah2_script_callback_trace[trace_slot][8] = g_eax;
+            g_dah2_script_callback_trace[trace_slot][9] = g_ecx;
+            g_dah2_script_callback_trace[trace_slot][10] = g_edx;
+            g_dah2_script_callback_trace[trace_slot][11] = *manual_mem32(protect_esi);
+        }
         if (icall_target == 0x001018D0u || icall_target == 0x00124DC0u) {
             DAH2_TRACE_FPRINTF(stderr,
                     "[SCRIPT-RETURN] target=%08X ax=%08X cx=%08X dx=%08X "
@@ -721,9 +1237,10 @@ void sub_002117C0(void)
     g_eax = g_eax << 3;
     g_ecx = g_eax;
     g_eax = *manual_mem32(g_esi);
-    g_edi = saved_edi;
+    g_edi = *manual_mem32(g_esp); g_esp += 4;
     *manual_mem32(g_esi + 0x10) = scratch_ebp;
     g_eax = g_eax - g_ecx;
+    g_ebp = *manual_mem32(g_esp); g_esp += 4;
     g_esp += 4;  /* ret: pop caller's pushed return-address literal */
 }
 
@@ -752,6 +1269,21 @@ extern void sub_00165870(void);
 extern void sub_001658F0(void);
 extern void sub_001C0B20(void);
 
+volatile uint32_t g_dah2_resource_lookup_calls;
+volatile uint32_t g_dah2_resource_high_alias_calls;
+volatile uint32_t g_dah2_resource_invalid_pointer_calls;
+volatile uint32_t g_dah2_resource_zero_type_calls;
+volatile uint32_t g_dah2_resource_identity_hits;
+volatile uint32_t g_dah2_resource_factory_misses;
+volatile uint32_t g_dah2_resource_create_successes;
+volatile uint32_t g_dah2_resource_last_pointer;
+volatile uint32_t g_dah2_resource_last_type;
+volatile uint32_t g_dah2_resource_pointers[256];
+volatile uint32_t g_dah2_resource_types[256];
+volatile uint32_t g_dah2_resource_factory_targets[256];
+volatile uint32_t g_dah2_resource_results[256];
+volatile uint32_t g_dah2_resource_outcomes[256];
+
 void sub_00161D80(void)
 {
     /* Prologue: save ecx, ebx, esi */
@@ -765,9 +1297,15 @@ void sub_00161D80(void)
 
     g_esi = *manual_mem32(g_esp + 0x10);  /* resource ptr */
     g_ebx = g_ecx;                         /* manager */
+    uint32_t telemetry_slot = g_dah2_resource_lookup_calls++;
+    g_dah2_resource_last_pointer = g_esi;
+    if (telemetry_slot < 256u)
+        g_dah2_resource_pointers[telemetry_slot] = g_esi;
 
     /* NULL check */
     if (g_esi == 0) {
+        if (telemetry_slot < 256u)
+            g_dah2_resource_outcomes[telemetry_slot] = 1u;
         g_esi = *manual_mem32(g_esp); g_esp += 4;
         g_eax = 0;
         g_ebx = *manual_mem32(g_esp); g_esp += 4;
@@ -776,11 +1314,12 @@ void sub_00161D80(void)
         return;
     }
 
-    /* GUARD 0: resource pointer outside mapped Xbox memory.
-     * Physical-mirror window covers 0x80000000-0x87FFFFFF (128MB).
-     * Pointers beyond 0x88000000 are truncated Win32 host addresses that were
-     * never placed in the contig region; dereferencing them faults. */
-    if (g_esi >= 0x88000000u) {
+    /* GUARD 0: resource pointer outside mapped Xbox memory.  The physical
+     * segment repeats the contiguous backing through 0xBFFFFFFF. */
+    if (g_esi >= 0xC0000000u) {
+        g_dah2_resource_invalid_pointer_calls++;
+        if (telemetry_slot < 256u)
+            g_dah2_resource_outcomes[telemetry_slot] = 1u;
         uint32_t ffp0 = *manual_mem32(g_esp + 0x14);
         if (ffp0) *((uint8_t *)((uintptr_t)g_xbox_mem_offset + ffp0)) = 0;
         g_esi = *manual_mem32(g_esp); g_esp += 4;
@@ -790,9 +1329,17 @@ void sub_00161D80(void)
         g_esp += 12;
         return;
     }
+    if (g_esi >= 0x88000000u)
+        g_dah2_resource_high_alias_calls++;
+    g_dah2_resource_last_type = *manual_mem32(g_esi);
+    if (telemetry_slot < 256u)
+        g_dah2_resource_types[telemetry_slot] = g_dah2_resource_last_type;
 
     /* GUARD 1: type == 0 → resource uninitialized, factory lookup will always fail */
     if (*manual_mem32(g_esi) == 0) {
+        g_dah2_resource_zero_type_calls++;
+        if (telemetry_slot < 256u)
+            g_dah2_resource_outcomes[telemetry_slot] = 2u;
         uint32_t ffp = *manual_mem32(g_esp + 0x14);
         if (ffp) *((uint8_t *)((uintptr_t)g_xbox_mem_offset + ffp)) = 0;
         g_esi = *manual_mem32(g_esp); g_esp += 4;
@@ -832,12 +1379,17 @@ void sub_00161D80(void)
     uint32_t result1 = *manual_mem32(g_esp + 0x0C);  /* result at saved_ecx slot */
 
     if (result1 != 0xA00FA00Fu) {
+        g_dah2_resource_identity_hits++;
         /* Found: bump refcount, return resource object */
         uint32_t ffp = *manual_mem32(g_esp + 0x18);
         *((uint8_t *)((uintptr_t)g_xbox_mem_offset + ffp)) = 1;
         uint32_t node4 = *manual_mem32(result1 + 4);
         *((uint16_t *)((uintptr_t)g_xbox_mem_offset + node4 + 8)) += 1;
         g_eax = *manual_mem32(node4);
+        if (telemetry_slot < 256u) {
+            g_dah2_resource_results[telemetry_slot] = g_eax;
+            g_dah2_resource_outcomes[telemetry_slot] = 3u;
+        }
         g_edi = *manual_mem32(g_esp); g_esp += 4;
         g_esi = *manual_mem32(g_esp); g_esp += 4;
         g_ebx = *manual_mem32(g_esp); g_esp += 4;
@@ -873,6 +1425,9 @@ void sub_00161D80(void)
 
             /* GUARD 2b: factory not registered for this type */
             if (result2 == 0xA00FA00Fu) {
+                g_dah2_resource_factory_misses++;
+                if (telemetry_slot < 256u)
+                    g_dah2_resource_outcomes[telemetry_slot] = 4u;
                 g_ebx = 0;
             } else {
                 /* Factory found: call it to create the resource object.
@@ -888,12 +1443,25 @@ void sub_00161D80(void)
                 uint32_t protect_esi = g_esi, protect_edi = g_edi, protect_ebx = g_ebx;
                 uint32_t _icall_esp = g_esp;
                 uint32_t _icall_target = *manual_mem32(result2 + 4);
+                if (telemetry_slot < 256u)
+                    g_dah2_resource_factory_targets[telemetry_slot] = _icall_target;
                 g_esp -= 4; *manual_mem32(g_esp) = 0x00161DF8u;
                 recomp_func_t fn = recomp_lookup_manual(_icall_target);
                 if (!fn) fn = recomp_lookup(_icall_target);
                 if (!fn) fn = recomp_lookup_kernel(_icall_target);
-                if (fn) fn();
-                else { recomp_icall_fail_log(_icall_target); g_esp = _icall_esp; g_eax = 0; }
+                if (fn) {
+                    fn();
+                    if (telemetry_slot < 256u) {
+                        g_dah2_resource_results[telemetry_slot] = g_eax;
+                        g_dah2_resource_outcomes[telemetry_slot] = (g_eax != 0) ? 7u : 6u;
+                    }
+                } else {
+                    recomp_icall_fail_log(_icall_target);
+                    g_esp = _icall_esp;
+                    g_eax = 0;
+                    if (telemetry_slot < 256u)
+                        g_dah2_resource_outcomes[telemetry_slot] = 5u;
+                }
                 g_esi = protect_esi;
                 g_edi = protect_edi;
                 g_ebx = protect_ebx;
@@ -901,6 +1469,7 @@ void sub_00161D80(void)
                 g_ebx = g_eax;  /* created object (or 0) */
 
                 if (g_ebx != 0) {
+                    g_dah2_resource_create_successes++;
                     /* Link new object into manager's resource list */
                     g_eax = *manual_mem32(g_esi + 4);
                     *manual_mem32(g_ebx + 4) = g_eax;
@@ -1884,12 +2453,14 @@ void sub_000F7C50(void)
     F7C50_CALL(sub_001046A0, 0x000F7C76u);
 
     /* loc_000F7C76 */
+    dah2_capture_f7c50_stage(0x000F7C76u, ebp);
     g_edi = *manual_mem32(g_esp + 0x1C);
     g_esp -= 4; *manual_mem32(g_esp) = g_edi;
     g_ecx = g_esi;
     F7C50_CALL(sub_00115B10, 0x000F7C82u);
 
     /* loc_000F7C82 */
+    dah2_capture_f7c50_stage(0x000F7C82u, ebp);
     if (*(volatile uint8_t *)manual_mem8(g_esi + 0x303C) == 0) {
         /* loc_000F7C8C */
         g_ecx = *manual_mem32(0x307308);
@@ -1898,6 +2469,7 @@ void sub_000F7C50(void)
     }
 
     /* loc_000F7C98 */
+    dah2_capture_f7c50_stage(0x000F7C98u, ebp);
     g_esp -= 4; *manual_mem32(g_esp) = g_edi;
     g_ecx = g_esi;
     {
@@ -1913,6 +2485,7 @@ void sub_000F7C50(void)
     }
 
     /* loc_000F7CA0 */
+    dah2_capture_f7c50_stage(0x000F7CA0u, ebp);
     g_esp -= 4; *manual_mem32(g_esp) = g_edi;
     g_ecx = g_esi;
     {
@@ -1924,6 +2497,7 @@ void sub_000F7C50(void)
     }
 
     /* loc_000F7CA8 */
+    dah2_capture_f7c50_stage(0x000F7CA8u, ebp);
     if (*(volatile uint8_t *)manual_mem8(g_esi + 0x303C) != 0) {
         /* loc_000F7CB2 */
         if (*manual_mem32(g_esi + 8) == 1) {
@@ -1935,7 +2509,13 @@ void sub_000F7C50(void)
             F7C50_CALL(sub_00115E40, 0x000F7CD1u);
 
             /* loc_000F7CD1 */
-            g_edx = *manual_mem32(g_esp + 0x20);
+            /* Retail's stack slot aliases the fixed simulation delta produced
+             * by sub_00115200.  The manual transplant repairs several nested
+             * callees' leaked stack frames, so that historical stack offset no
+             * longer names the same value.  Read the authoritative engine
+             * field directly; xemu carries 0x3C888889 here for the title tick. */
+            g_edx = *manual_mem32(g_esi + 0x10);
+            dah2_probe_anim_event(0, g_esi, g_edx, g_ecx);
             g_ecx = g_esp + 0x10;
             *manual_mem32(g_esp + 0x10) = 0x2AFD20;
             *manual_mem32(g_esp + 0x18) = g_edx;
@@ -1973,36 +2553,43 @@ void sub_000F7C50(void)
     F7C50_CALL(sub_0014CE80, 0x000F7CFCu);
 
     /* loc_000F7CFC */
+    dah2_capture_f7c50_stage(0x000F7CFCu, ebp);
     g_ecx = *manual_mem32(0x2F210C);
     g_esp -= 4; *manual_mem32(g_esp) = g_edi;
     F7C50_CALL(sub_00069F30, 0x000F7D08u);
 
     /* loc_000F7D08 */
+    dah2_capture_f7c50_stage(0x000F7D08u, ebp);
     g_ecx = *manual_mem32(0x307300);
     g_esp -= 4; *manual_mem32(g_esp) = g_edi;
     F7C50_CALL(sub_000F3C90, 0x000F7D14u);
 
     /* loc_000F7D14 */
+    dah2_capture_f7c50_stage(0x000F7D14u, ebp);
     g_ecx = *manual_mem32(0x3072FC);
     g_esp -= 4; *manual_mem32(g_esp) = g_edi;
     F7C50_CALL(sub_000F36C0, 0x000F7D20u);
 
     /* loc_000F7D20 */
+    dah2_capture_f7c50_stage(0x000F7D20u, ebp);
     g_ecx = *manual_mem32(0x30FDF8);
     g_esp -= 4; *manual_mem32(g_esp) = g_edi;
     F7C50_CALL(sub_00121B40, 0x000F7D2Cu);
 
     /* loc_000F7D2C */
+    dah2_capture_f7c50_stage(0x000F7D2Cu, ebp);
     g_ecx = *manual_mem32(0x30FE38);
     g_esp -= 4; *manual_mem32(g_esp) = g_edi;
     F7C50_CALL(sub_0012D910, 0x000F7D38u);
 
     /* loc_000F7D38 */
+    dah2_capture_f7c50_stage(0x000F7D38u, ebp);
     g_ecx = *manual_mem32(0x30F164);
     g_esp -= 4; *manual_mem32(g_esp) = g_edi;
     F7C50_CALL(sub_000F98A0, 0x000F7D44u);
 
     /* loc_000F7D44 */
+    dah2_capture_f7c50_stage(0x000F7D44u, ebp);
     g_ecx = *manual_mem32(0x3072E8);
     g_esp -= 4; *manual_mem32(g_esp) = g_edi;
     /* sub_000E5930 is a translator-split fragment of a much larger retail
@@ -2025,11 +2612,13 @@ void sub_000F7C50(void)
       g_esi = protect_esi; g_edi = protect_edi; g_ebx = protect_ebx; }
 
     /* loc_000F7D50 */
+    dah2_capture_f7c50_stage(0x000F7D50u, ebp);
     g_ecx = *manual_mem32(0x307308);
     g_esp -= 4; *manual_mem32(g_esp) = g_edi;
     F7C50_CALL(sub_000F6460, 0x000F7D5Cu);
 
 loc_000F7D5C_b:
+    dah2_capture_f7c50_stage(0x000F7D5Cu, ebp);
     /* loc_000F7D5C: convergence point of both branches */
     DAH2_TRACE_FPRINTF(stderr, "[F7C50] pre-C9A0 g_ebx=0x%08X (expect 0x812142D0-ish 'this'), MEM32(ebx+0x10)=0x%08X\n",
             g_ebx, *manual_mem32(g_ebx + 0x10));
@@ -2038,11 +2627,13 @@ loc_000F7D5C_b:
     F7C50_CALL(sub_0012C9A0, 0x000F7D65u);
 
     /* loc_000F7D65 */
+    dah2_capture_f7c50_stage(0x000F7D65u, ebp);
     g_esp -= 4; *manual_mem32(g_esp) = g_edi;
     g_ecx = g_esi;
     F7C50_CALL(sub_00115030, 0x000F7D6Du);
 
     /* loc_000F7D6D */
+    dah2_capture_f7c50_stage(0x000F7D6Du, ebp);
     g_esp -= 4; *manual_mem32(g_esp) = g_edi;
     g_ecx = g_esi;
     /* Same translator-split-fragment issue as sub_000E5930 above: observed
@@ -2053,6 +2644,7 @@ loc_000F7D5C_b:
       g_esi = protect_esi; g_edi = protect_edi; g_ebx = protect_ebx; }
 
     /* loc_000F7D75 */
+    dah2_capture_f7c50_stage(0x000F7D75u, ebp);
     g_esp -= 4; *manual_mem32(g_esp) = g_edi;
     g_ecx = g_esi;
     {
@@ -2068,13 +2660,16 @@ loc_000F7D5C_b:
     }
 
     /* loc_000F7D7D */
+    dah2_capture_f7c50_stage(0x000F7D7Du, ebp);
     g_ecx = *manual_mem32(0x307310);
     F7C50_CALL(sub_000F7330, 0x000F7D88u);
 
     /* loc_000F7D88 */
+    dah2_capture_f7c50_stage(0x000F7D88u, ebp);
     F7C50_CALL(sub_00102090, 0x000F7D8Du);
 
     /* loc_000F7D8D */
+    dah2_capture_f7c50_stage(0x000F7D8Du, ebp);
     g_eax = *manual_mem32(g_esi + 8);
     g_ecx = *manual_mem32(0x307100);
     g_edx = 0;
@@ -2085,16 +2680,19 @@ loc_000F7D5C_b:
     F7C50_CALL(sub_000C9530, 0x000F7DA6u);
 
     /* loc_000F7DA6 */
+    dah2_capture_f7c50_stage(0x000F7DA6u, ebp);
     g_esp -= 4; *manual_mem32(g_esp) = g_edi;
     g_ecx = g_esi;
     F7C50_CALL(sub_00115120, 0x000F7DAEu);
 
     /* loc_000F7DAE */
+    dah2_capture_f7c50_stage(0x000F7DAEu, ebp);
     g_esp -= 4; *manual_mem32(g_esp) = g_edi;
     g_ecx = g_esi;
     F7C50_CALL(sub_001152B0, 0x000F7DB6u);
 
     /* loc_000F7DB6 */
+    dah2_capture_f7c50_stage(0x000F7DB6u, ebp);
     g_edi = *manual_mem32(g_esp); g_esp += 4;   /* POP32(esp, edi) */
     g_esi = *manual_mem32(g_esp); g_esp += 4;   /* POP32(esp, esi) */
     g_ebx = *manual_mem32(g_esp); g_esp += 4;   /* POP32(esp, ebx) */
@@ -2241,6 +2839,243 @@ typedef struct Dah2InputEvent {
 
 #define DAH2_INPUT_HANDLE_BASE 0xDA220000u
 static int g_dah2_input_reported;
+/* Observational counters only; no guest input or scheduling changes. */
+volatile uint32_t g_dah2_input_polls;
+volatile uint32_t g_dah2_input_latest_packet;
+volatile uint32_t g_dah2_input_latest_buttons;
+
+/* Read-only parity counters.  These stay out of the guest address space and
+ * let hidden runs prove whether the recovered title-vector callbacks execute
+ * and whether they actually change the retail count at 0x31D9D0. */
+volatile uint32_t g_dah2_title_update_calls;
+volatile uint32_t g_dah2_title_ready_commits;
+volatile uint32_t g_dah2_title_remove_calls;
+volatile uint32_t g_dah2_title_remove_matches;
+volatile uint32_t g_dah2_title_remove_count_before;
+volatile uint32_t g_dah2_title_remove_count_after;
+volatile uint32_t g_dah2_title_append_calls;
+volatile uint32_t g_dah2_title_append_rejected;
+volatile uint32_t g_dah2_title_append_count_before;
+volatile uint32_t g_dah2_title_append_count_after;
+volatile uint32_t g_dah2_title_append_successes;
+volatile uint32_t g_dah2_title_append_surfaces[32];
+volatile uint32_t g_dah2_title_append_sizes[32];
+volatile uint32_t g_dah2_title_append_callsites[32];
+volatile uint32_t g_dah2_title_remove_surfaces[32];
+volatile uint32_t g_dah2_title_remove_callsites[32];
+
+/* Read-only parity telemetry for the central scene/resource object loader.
+ * Retail has advanced the handle-generation counter at 0x002EC144 roughly
+ * 147 times by the title screen, while the recomp currently advances it only
+ * a handful of times. Capture loader entries without changing guest state so
+ * paired xemu/recomp probes can distinguish an upstream skip from an early
+ * exit inside sub_001A8EB0. */
+volatile uint32_t g_dah2_object_loader_calls;
+volatile uint32_t g_dah2_object_loader_ecx[128];
+volatile uint32_t g_dah2_object_loader_arg1[128];
+volatile uint32_t g_dah2_object_loader_return[128];
+volatile uint32_t g_dah2_object_loader_trace[128][48];
+volatile uint32_t g_dah2_object_loader_callback_ordinals[128];
+volatile uint32_t g_dah2_object_loader_state_after[128][16];
+volatile uint32_t g_dah2_object_loader_stack_after[128][32];
+volatile uint32_t g_dah2_handle_alloc_calls;
+volatile uint32_t g_dah2_handle_alloc_callsites[128];
+volatile uint32_t g_dah2_handle_alloc_results[128];
+volatile uint32_t g_dah2_resource_method_a5d30_calls;
+volatile uint32_t g_dah2_resource_method_a5d30_trace[128][20];
+
+extern void sub_000A5D30(void);
+static void traced_sub_000A5D30(void)
+{
+    uint32_t slot = g_dah2_resource_method_a5d30_calls++;
+    volatile uint32_t *row = slot < 128u ? g_dah2_resource_method_a5d30_trace[slot] : 0;
+    uint32_t object = g_ecx;
+    if (row) {
+        row[0]=object; row[1]=*manual_mem32(g_esp); row[2]=g_eax;
+        row[3]=g_edx; row[4]=g_ebx; row[5]=g_esp;
+        for (uint32_t i=0; i<10u; ++i)
+            row[6u+i]=*manual_mem32(object+0x60u+i*4u);
+    }
+    sub_000A5D30();
+    if (row) {
+        row[16]=g_eax; row[17]=g_ecx; row[18]=g_edx; row[19]=g_esp;
+    }
+}
+
+/* Read-only telemetry for the first proven post-loader divergence. Retail's
+ * callback 0x001044C0 returns directly to the scene callback, while the recomp
+ * currently schedules an extra block of Lua callbacks. */
+volatile uint32_t g_dah2_callback_1044c0_calls;
+volatile uint32_t g_dah2_callback_1044c0_trace[64][40];
+volatile uint32_t g_dah2_dispatch_1040b0_calls;
+volatile uint32_t g_dah2_dispatch_1040b0_trace[128][32];
+extern void sub_001040B0(void);
+static void traced_sub_001040B0(void)
+{
+    uint32_t slot = 0xFFFFFFFFu;
+    volatile uint32_t *row = 0;
+    if (g_dah2_object_loader_calls > 0u) {
+        slot = g_dah2_dispatch_1040b0_calls++;
+        if (slot < 128u)
+            row = g_dah2_dispatch_1040b0_trace[slot];
+    }
+    if (row) {
+        row[0]=g_dah2_object_loader_calls; row[1]=g_dah2_script_callback_calls;
+        row[2]=g_eax; row[3]=g_ecx; row[4]=g_edx; row[5]=g_ebx;
+        row[6]=g_esp; row[7]=g_ebp; row[8]=g_esi; row[9]=g_edi;
+        row[10]=*manual_mem32(g_esp); row[11]=*manual_mem32(g_esp+4u);
+        row[12]=*manual_mem32(g_esp+8u); row[13]=*manual_mem32(g_ecx);
+        row[14]=*manual_mem32(g_ecx+4u); row[15]=*manual_mem32(g_ecx+0x48u);
+        row[16]=*manual_mem32(g_ecx+0x4Cu); row[17]=*manual_mem32(0x0030FC18u);
+    }
+    sub_001040B0();
+    if (row) {
+        row[18]=g_eax; row[19]=g_ecx; row[20]=g_edx; row[21]=g_ebx;
+        row[22]=g_esp; row[23]=g_ebp; row[24]=g_esi; row[25]=g_edi;
+        row[26]=*manual_mem32(row[3]); row[27]=*manual_mem32(row[3]+4u);
+        row[28]=*manual_mem32(row[3]+0x48u); row[29]=*manual_mem32(row[3]+0x4Cu);
+        row[30]=*manual_mem32(0x0030FC18u);
+    }
+}
+extern void sub_001044C0(void);
+static void traced_sub_001044C0(void)
+{
+    uint32_t slot = 0xFFFFFFFFu;
+    volatile uint32_t *row = 0;
+    if (g_dah2_object_loader_calls > 0u) {
+        slot = g_dah2_callback_1044c0_calls++;
+        if (slot < 64u)
+            row = g_dah2_callback_1044c0_trace[slot];
+    }
+    if (row) {
+        uint32_t count = *manual_mem32(0x0030FC18u);
+        uint32_t stack = 0x0030FC1Fu & 0xFFFFFFFCu;
+        uint32_t top = count ? stack + count * 4u - 4u : 0u;
+        row[0]=g_dah2_object_loader_calls; row[1]=g_dah2_script_callback_calls;
+        row[2]=g_eax; row[3]=g_ecx; row[4]=g_edx; row[5]=g_ebx;
+        row[6]=g_esp; row[7]=g_ebp; row[8]=g_esi; row[9]=g_edi;
+        row[10]=count; row[11]=top; row[12]=top ? *manual_mem32(top) : 0u;
+        row[13]=*manual_mem32(0x0030FD08u); row[14]=*manual_mem32(0x002C8BB8u);
+        row[15]=row[14] ? *manual_mem32(row[14]) : 0u;
+        row[16]=*manual_mem32(g_ecx); row[17]=*manual_mem32(g_ecx+4u);
+        row[18]=*manual_mem32(g_ecx+8u); row[19]=*manual_mem32(g_ecx+0x10u);
+    }
+    sub_001044C0();
+    if (row) {
+        uint32_t count = *manual_mem32(0x0030FC18u);
+        uint32_t stack = 0x0030FC1Fu & 0xFFFFFFFCu;
+        uint32_t top = count ? stack + count * 4u - 4u : 0u;
+        row[20]=g_eax; row[21]=g_ecx; row[22]=g_edx; row[23]=g_ebx;
+        row[24]=g_esp; row[25]=g_ebp; row[26]=g_esi; row[27]=g_edi;
+        row[28]=count; row[29]=top; row[30]=top ? *manual_mem32(top) : 0u;
+        row[31]=*manual_mem32(0x0030FD08u); row[32]=*manual_mem32(0x002C8BB8u);
+        row[33]=row[32] ? *manual_mem32(row[32]) : 0u;
+        row[34]=*manual_mem32(g_ecx); row[35]=*manual_mem32(g_ecx+4u);
+        row[36]=*manual_mem32(g_ecx+8u); row[37]=*manual_mem32(g_ecx+0x10u);
+    }
+}
+
+/* Read-only scene traversal telemetry.  Keep this out of guest memory so the
+ * private parity runner can inspect the real title path without affecting it. */
+volatile uint32_t g_dah2_menu_world_calls;
+volatile uint32_t g_dah2_menu_query_calls;
+volatile uint32_t g_dah2_menu_query_last_count;
+volatile uint32_t g_dah2_menu_query_max_count;
+volatile uint32_t g_dah2_scene_query_scratch_words[4];
+volatile uint32_t g_dah2_scene_query_result_count;
+volatile uint32_t g_dah2_scene_query_manager_blocks;
+volatile uint32_t g_dah2_scene_query_scratch_address;
+volatile uint32_t g_dah2_menu_candidate_calls;
+volatile uint32_t g_dah2_menu_object_dispatch_calls;
+volatile uint32_t g_dah2_menu_last_world;
+volatile uint32_t g_dah2_menu_last_query;
+volatile uint32_t g_dah2_menu_candidate_nodes[64];
+volatile uint32_t g_dah2_menu_candidate_flags[64];
+volatile uint32_t g_dah2_menu_candidate_objects[64];
+volatile uint32_t g_dah2_menu_candidate_vtables[64];
+volatile uint32_t g_dah2_menu_stage_sequence;
+volatile uint32_t g_dah2_menu_stage_ring[4096][12];
+volatile uint32_t g_dah2_draw_record_sequence;
+volatile uint32_t g_dah2_draw_record_ring[4096][16];
+volatile uint32_t g_dah2_visibility_sequence;
+volatile uint32_t g_dah2_visibility_ring[4096][60];
+volatile uint32_t g_dah2_natalia_transform_sequence;
+volatile uint32_t g_dah2_natalia_transform_ring[8192][20];
+volatile uint32_t g_dah2_menu_active_node;
+volatile uint32_t g_dah2_menu_active_object;
+
+extern void sub_001A8EB0(void);
+static void traced_sub_001A8EB0(void)
+{
+    uint32_t slot = g_dah2_object_loader_calls++;
+    if (slot < 128u) {
+        g_dah2_object_loader_callback_ordinals[slot] = g_dah2_script_callback_calls;
+        g_dah2_object_loader_ecx[slot] = g_ecx;
+        g_dah2_object_loader_arg1[slot] = *manual_mem32(g_esp + 4u);
+        g_dah2_object_loader_return[slot] = *manual_mem32(g_esp);
+        g_dah2_object_loader_trace[slot][0] = g_ecx;
+        g_dah2_object_loader_trace[slot][1] = *manual_mem32(g_esp + 4u);
+        g_dah2_object_loader_trace[slot][2] = *manual_mem32(g_esp);
+        g_dah2_object_loader_trace[slot][3] = g_eax;
+        g_dah2_object_loader_trace[slot][4] = g_edx;
+        g_dah2_object_loader_trace[slot][5] = g_ebx;
+        g_dah2_object_loader_trace[slot][6] = g_esi;
+        g_dah2_object_loader_trace[slot][7] = g_edi;
+        g_dah2_object_loader_trace[slot][8] = g_esp;
+        for (uint32_t i = 0; i < 16u; ++i)
+            g_dah2_object_loader_trace[slot][16u + i] = *manual_mem32(g_ecx + i * 4u);
+        for (uint32_t i = 0; i < 8u; ++i)
+            g_dah2_object_loader_trace[slot][32u + i] = *manual_mem32(g_dah2_object_loader_arg1[slot] + i * 4u);
+        for (uint32_t i = 0; i < 8u; ++i)
+            g_dah2_object_loader_trace[slot][40u + i] = *manual_mem32(g_ebx + i * 4u);
+    }
+    sub_001A8EB0();
+    if (slot < 128u) {
+        g_dah2_object_loader_trace[slot][9] = g_eax;
+        g_dah2_object_loader_trace[slot][10] = g_ecx;
+        g_dah2_object_loader_trace[slot][11] = g_edx;
+        g_dah2_object_loader_trace[slot][12] = g_ebx;
+        g_dah2_object_loader_trace[slot][13] = g_esi;
+        g_dah2_object_loader_trace[slot][14] = g_edi;
+        g_dah2_object_loader_trace[slot][15] = g_esp;
+        for (uint32_t i = 0; i < 16u; ++i)
+            g_dah2_object_loader_state_after[slot][i] = *manual_mem32(g_dah2_object_loader_ecx[slot] + i * 4u);
+        uint32_t top_after = *manual_mem32(g_dah2_object_loader_ecx[slot]);
+        for (uint32_t i = 0; i < 32u; ++i)
+            g_dah2_object_loader_stack_after[slot][i] = *manual_mem32(top_after - 0x40u + i * 4u);
+    }
+}
+
+/* Retail-faithful handle-slot allocator with read-only call-site telemetry. */
+void sub_001A8D10(void)
+{
+    uint32_t slot = g_dah2_handle_alloc_calls++;
+    uint32_t saved_esi = g_esi;
+    uint32_t index = 0;
+    uint32_t entry = 0x0031FF24u;
+
+    if (slot < 128u)
+        g_dah2_handle_alloc_callsites[slot] = *manual_mem32(g_esp);
+
+    while (entry < 0x0031FFE4u && *manual_mem32(entry) != 0u) {
+        entry += 0x18u;
+        ++index;
+    }
+    if (entry >= 0x0031FFE4u) {
+        g_eax = 0;
+    } else {
+        uint32_t generation = *manual_mem32(0x002EC144u);
+        uint32_t handle = (((generation & 0xFFFFu) | 0x10000u) << 3) | index;
+        *manual_mem32(0x002EC144u) = generation + 1u;
+        *manual_mem32(g_ecx) = handle;
+        g_eax = (index + index * 2u) * 8u + 0x0031FF20u;
+    }
+    if (slot < 128u)
+        g_dah2_handle_alloc_results[slot] = g_eax;
+    g_edx = index;
+    g_esi = saved_esi;
+    g_esp += 4u;
+}
 
 extern void sub_00296301(void);
 extern void sub_000FAFD5(void);
@@ -2249,9 +3084,15 @@ extern void sub_00297A06(void);
 
 static int dah2_hidden_input_enabled(void)
 {
-    const char *hidden = getenv("DAH2_TEST_WINDOW_HIDDEN");
-    const char *script = getenv("DAH2_INPUT_SCRIPT");
-    return hidden && strcmp(hidden, "1") == 0 && script && *script;
+    /* Polled on every XInput read; the environment cannot change under us.
+       Read it once rather than scanning the environment block per poll. */
+    static int cached = -1;
+    if (cached < 0) {
+        const char *hidden = getenv("DAH2_TEST_WINDOW_HIDDEN");
+        const char *script = getenv("DAH2_INPUT_SCRIPT");
+        cached = hidden && strcmp(hidden, "1") == 0 && script && *script;
+    }
+    return cached;
 }
 
 static void dah2_scripted_xinput_get_state(void)
@@ -2342,6 +3183,9 @@ static void dah2_scripted_xinput_get_state(void)
         memcpy(manual_mem8(output), state, sizeof(state));
     else
         fprintf(stderr, "[DAH2-INPUT] invalid output=%08X\n", output);
+    g_dah2_input_polls = poll + 1u;
+    g_dah2_input_latest_packet = packet;
+    g_dah2_input_latest_buttons = (uint32_t)(state[4] | ((unsigned)state[5] << 8));
     ++poll;
     eax = 0;       /* ERROR_SUCCESS */
     esp += 12u;    /* ret 8 */
@@ -2645,6 +3489,18 @@ void sub_0016E200(void)
 {
     uint32_t ebp = g_ebp;
     uint32_t target;
+    {
+        uint32_t sequence = g_dah2_draw_record_sequence++;
+        volatile uint32_t *record =
+            g_dah2_draw_record_ring[sequence & 4095u];
+        uint32_t index;
+        record[0] = sequence;
+        record[1] = ecx;
+        record[2] = MEM32(esp);
+        for (index = 0; index < 12u; ++index)
+            record[3u + index] = MEM32(esp + 4u + index * 4u);
+        record[15] = g_dah2_menu_active_object;
+    }
 #define DRAW_MEM16(a) (*(uint16_t *)manual_mem8(a))
 #define DRAW_SET16(r, v) ((r) = ((r) & 0xFFFF0000u) | (uint16_t)(v))
     PUSH32(esp, ebx);
@@ -2840,6 +3696,87 @@ extern __declspec(thread) double g_fp_stack[8];
 extern __declspec(thread) int g_fp_top;
 extern void sub_0013B550(void);
 
+volatile uint32_t g_dah2_grid_floor_calls;
+volatile uint64_t g_dah2_grid_floor_input_bits;
+volatile uint64_t g_dah2_grid_floor_output_bits;
+volatile uint32_t g_dah2_grid_ftol_calls[4];
+volatile uint64_t g_dah2_grid_ftol_input_bits[4];
+volatile uint32_t g_dah2_grid_ftol_output_lo[4];
+volatile uint32_t g_dah2_grid_ftol_output_hi[4];
+volatile uint32_t g_dah2_grid_query_ptr[2];
+volatile uint32_t g_dah2_grid_input_ptr[2];
+volatile uint32_t g_dah2_grid_input_xy_bits[4];
+volatile uint32_t g_dah2_grid_origin_xy_bits[4];
+volatile uint32_t g_dah2_grid_scale_bits[2];
+volatile uint32_t g_dah2_grid_calc_xy_bits[4];
+volatile uint32_t g_dah2_menu_renderer_ptr;
+volatile uint32_t g_dah2_menu_frustum_bits[24];
+volatile uint32_t g_dah2_menu_bounds_initial_bits[4];
+volatile uint32_t g_dah2_menu_bounds_final_bits[4];
+volatile uint32_t g_dah2_frustum_update_calls;
+volatile uint32_t g_dah2_frustum_bad_updates;
+volatile uint32_t g_dah2_frustum_good_updates;
+volatile uint32_t g_dah2_frustum_bad_renderer;
+volatile uint32_t g_dah2_frustum_bad_camera;
+volatile uint32_t g_dah2_frustum_bad_matrix_bits[16];
+volatile uint32_t g_dah2_frustum_bad_corner_bits[24];
+volatile uint32_t g_dah2_frustum_bad_return;
+volatile uint32_t g_dah2_frustum_good_return;
+volatile uint32_t g_dah2_frustum_good_renderer;
+volatile uint32_t g_dah2_frustum_good_camera;
+volatile uint32_t g_dah2_frustum_good_matrix_bits[16];
+volatile uint32_t g_dah2_frustum_bad_argument;
+volatile uint32_t g_dah2_frustum_bad_argument_value;
+volatile uint32_t g_dah2_frustum_good_argument;
+volatile uint32_t g_dah2_frustum_good_argument_value;
+volatile uint32_t g_dah2_camera_cache_repair_attempts;
+volatile uint32_t g_dah2_camera_cache_repair_successes;
+volatile uint32_t g_dah2_camera_cache_source;
+volatile uint32_t g_dah2_camera_cache_before_bits[16];
+volatile uint32_t g_dah2_camera_cache_after_bits[16];
+
+static int dah2_rebuild_transform_cache(uint32_t object)
+{
+    float local[16], result[16];
+    float x, y, z, w, scale, combined_scale;
+    uint32_t parent;
+    if (object < 0x00010000u || MEM32(object) != 0x002B387Cu)
+        return 0;
+    x = MEMF(object + 0x20); y = MEMF(object + 0x24);
+    z = MEMF(object + 0x28); w = MEMF(object + 0x2C);
+    scale = MEMF(object + 0x1C);
+    local[0] = (1.0f - 2.0f * (y*y + z*z)) * scale;
+    local[1] = (2.0f * (x*y + z*w)) * scale;
+    local[2] = (2.0f * (x*z - y*w)) * scale; local[3] = 0.0f;
+    local[4] = (2.0f * (x*y - z*w)) * scale;
+    local[5] = (1.0f - 2.0f * (x*x + z*z)) * scale;
+    local[6] = (2.0f * (y*z + x*w)) * scale; local[7] = 0.0f;
+    local[8] = (2.0f * (x*z + y*w)) * scale;
+    local[9] = (2.0f * (y*z - x*w)) * scale;
+    local[10] = (1.0f - 2.0f * (x*x + y*y)) * scale; local[11] = 0.0f;
+    local[12] = MEMF(object + 0x10); local[13] = MEMF(object + 0x14);
+    local[14] = MEMF(object + 0x18); local[15] = 1.0f;
+    parent = MEM32(object + 8);
+    combined_scale = scale;
+    if (parent >= 0x00010000u && MEM32(parent) == 0x002B387Cu) {
+        for (unsigned row = 0; row < 4; ++row)
+            for (unsigned column = 0; column < 4; ++column) {
+                float value = local[row*4] * MEMF(parent + 0x60 + column*4);
+                value += local[row*4 + 1] * MEMF(parent + 0x70 + column*4);
+                value += local[row*4 + 2] * MEMF(parent + 0x80 + column*4);
+                value += local[row*4 + 3] * MEMF(parent + 0x90 + column*4);
+                result[row*4 + column] = value;
+            }
+        combined_scale *= MEMF(parent + 0x3C);
+    } else {
+        memcpy(result, local, sizeof(result));
+    }
+    for (unsigned i = 0; i < 16; ++i) MEMF(object + 0x60 + i*4) = result[i];
+    MEMF(object + 0x3C) = combined_scale;
+    MEMF(object + 0x38) = 1.0f / combined_scale;
+    MEM32(object + 0x30) |= 0x10u;
+    return 1;
+}
 /* Retail 0x001C6A27 is the x87 ceil helper used by sub_0013C410.
  * The generated CRT body loses its x87 return on the ordinary finite-number
  * path, so ceil(0.11547...) reaches sub_001C55FC as 0 instead of retail's 1.
@@ -2854,6 +3791,56 @@ void sub_001C6A27(void)
     g_fp_top = (g_fp_top + 7) & 7;
     g_fp_stack[g_fp_top] = ceil(input);
     g_esp += 4; /* ret; caller removes the 8-byte argument */
+}
+/* Retail 0x001C6AFA is the matching x87 floor helper used by
+ * sub_0013C430. The generated CRT body also loses its ordinary finite
+ * result, leaving the scene-grid lower bound as raw float bits. */
+void sub_001C6AFA(void)
+{
+    uint64_t bits = (uint64_t)MEM32(g_esp + 4)
+                  | ((uint64_t)MEM32(g_esp + 8) << 32);
+    double input;
+    memcpy(&input, &bits, sizeof(input));
+    if (MEM32(g_esp) == 0x0013C43F) {
+        g_dah2_grid_floor_calls++;
+        g_dah2_grid_floor_input_bits = bits;
+    }
+    g_fp_top = (g_fp_top + 7) & 7;
+    g_fp_stack[g_fp_top] = floor(input);
+    if (MEM32(g_esp) == 0x0013C43F)
+        memcpy((void *)&g_dah2_grid_floor_output_bits,
+               &g_fp_stack[g_fp_top], sizeof(double));
+    g_esp += 4; /* ret; caller removes the 8-byte argument */
+}
+/* Retail MSVC _ftol2 helper at 0x001C55FC. The generated body leaks raw
+ * floating-point temporaries into EAX on ordinary finite conversions. */
+void sub_001C55FC(void)
+{
+    double input = g_fp_stack[g_fp_top];
+    uint64_t input_bits;
+    uint32_t return_address = MEM32(g_esp);
+    int grid_slot = -1;
+    int64_t converted;
+    memcpy(&input_bits, &input, sizeof(input_bits));
+    if (return_address == 0x00176B16) grid_slot = 0;
+    else if (return_address == 0x00176B38) grid_slot = 1;
+    else if (return_address == 0x00176B5D) grid_slot = 2;
+    else if (return_address == 0x00176B7F) grid_slot = 3;
+    if (!isfinite(input) || input >= 9223372036854775808.0 ||
+        input < -9223372036854775808.0)
+        converted = INT64_MIN;
+    else
+        converted = (int64_t)input;
+    g_fp_top = (g_fp_top + 1) & 7;
+    g_eax = (uint32_t)(uint64_t)converted;
+    g_edx = (uint32_t)((uint64_t)converted >> 32);
+    if (grid_slot >= 0) {
+        g_dah2_grid_ftol_calls[grid_slot]++;
+        g_dah2_grid_ftol_input_bits[grid_slot] = input_bits;
+        g_dah2_grid_ftol_output_lo[grid_slot] = g_eax;
+        g_dah2_grid_ftol_output_hi[grid_slot] = g_edx;
+    }
+    g_esp += 4; /* ret */
 }
 /* Full retail 0x0015CD50..0x0015CE8B projection update. The old generated
  * function stopped at 15CD9A, while its no-camera branch reached the empty
@@ -2953,6 +3940,9 @@ void sub_0015CD50(void)
 void sub_0015E740(void)
 {
     uint32_t ebp;
+    uint32_t telemetry_return = MEM32(esp);
+    uint32_t telemetry_argument = MEM32(esp + 4);
+    uint32_t telemetry_argument_value = MEM32(telemetry_argument);
     int _flags = 0;
     uint32_t _fa = 0, _fb = 0;
     int32_t _fas = 0, _fbs = 0;
@@ -2989,7 +3979,35 @@ loc_0015E760: ;
 
 loc_0015E765: ;
     edi = eax;
-    ecx = edi;
+    /* Only the ordinary transform object (vtable 0x2B387C) is eligible.
+     * Other camera providers use unrelated layouts behind the same +0x90
+     * slot and must remain untouched. */
+    if (edi >= 0x00010000u && edi < 0x38000000u) {
+        uint32_t source = MEM32(edi + 0x90);
+        if (source >= 0x00010000u && MEM32(source) == 0x002B387Cu &&
+            (!isfinite(MEMF(source + 0x60)) || fabsf(MEMF(source + 0x60)) > 1024.0f ||
+             !isfinite(MEMF(source + 0x64)) || fabsf(MEMF(source + 0x64)) > 1024.0f ||
+             !isfinite(MEMF(source + 0x68)) || fabsf(MEMF(source + 0x68)) > 1024.0f ||
+             !isfinite(MEMF(source + 0x70)) || fabsf(MEMF(source + 0x70)) > 1024.0f ||
+             !isfinite(MEMF(source + 0x74)) || fabsf(MEMF(source + 0x74)) > 1024.0f ||
+             !isfinite(MEMF(source + 0x78)) || fabsf(MEMF(source + 0x78)) > 1024.0f ||
+             !isfinite(MEMF(source + 0x80)) || fabsf(MEMF(source + 0x80)) > 1024.0f ||
+             !isfinite(MEMF(source + 0x84)) || fabsf(MEMF(source + 0x84)) > 1024.0f ||
+             !isfinite(MEMF(source + 0x88)) || fabsf(MEMF(source + 0x88)) > 1024.0f)) {
+            g_dah2_camera_cache_repair_attempts++;
+            g_dah2_camera_cache_source = source;
+            for (unsigned i = 0; i < 16; ++i)
+                g_dah2_camera_cache_before_bits[i] = MEM32(source + 0x60 + i * 4);
+            if (dah2_rebuild_transform_cache(source)) {
+                for (unsigned i = 0; i < 16; ++i)
+                    g_dah2_camera_cache_after_bits[i] = MEM32(source + 0x60 + i * 4);
+                if (isfinite(MEMF(source + 0x60)) && fabsf(MEMF(source + 0x60)) <= 1024.0f &&
+                    isfinite(MEMF(source + 0x74)) && fabsf(MEMF(source + 0x74)) <= 1024.0f &&
+                    isfinite(MEMF(source + 0x88)) && fabsf(MEMF(source + 0x88)) <= 1024.0f)
+                    g_dah2_camera_cache_repair_successes++;
+            }
+        }
+    }    ecx = edi;
     PUSH32(esp, 0x0015E76Eu);
     sub_0015CD50();
 
@@ -3291,6 +4309,29 @@ loc_0015EB62: ;
     if ((ebp != 0)) goto loc_0015EB52;
 
 loc_0015EB6B: ;
+    g_dah2_frustum_update_calls++;
+    if (!isfinite(MEMF(esi + 0x110)) || fabsf(MEMF(esi + 0x110)) > 1000000.0f ||
+        !isfinite(MEMF(esi + 0x114)) || fabsf(MEMF(esi + 0x114)) > 1000000.0f) {
+        g_dah2_frustum_bad_updates++;
+        g_dah2_frustum_bad_renderer = esi;
+        g_dah2_frustum_bad_camera = edi;
+g_dah2_frustum_bad_return = telemetry_return;
+        g_dah2_frustum_bad_argument = telemetry_argument;
+        g_dah2_frustum_bad_argument_value = telemetry_argument_value;
+        for (unsigned i = 0; i < 16; ++i)
+            g_dah2_frustum_bad_matrix_bits[i] = MEM32(esi + 0x90 + i * 4);
+        for (unsigned i = 0; i < 24; ++i)
+            g_dah2_frustum_bad_corner_bits[i] = MEM32(esi + 0x110 + i * 4);
+    } else {
+        g_dah2_frustum_good_updates++;
+        g_dah2_frustum_good_return = telemetry_return;
+        g_dah2_frustum_good_renderer = esi;
+g_dah2_frustum_good_camera = edi;
+        g_dah2_frustum_good_argument = telemetry_argument;
+        g_dah2_frustum_good_argument_value = telemetry_argument_value;
+        for (unsigned i = 0; i < 16; ++i)
+            g_dah2_frustum_good_matrix_bits[i] = MEM32(esi + 0x90 + i * 4);
+    }
     eax = MEM32(esp + 0xEC);
     _fa = (uint32_t)(MEM32(eax)) & 0xFFFFFFFFu; _fb = (uint32_t)(0xFFFFFFFFu) & 0xFFFFFFFFu;
     _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb);
@@ -3609,6 +4650,7 @@ loc_0015C31D: ;
  * src/recomp/gen/recomp_0009.c:41812-42024. */
 void sub_0015ECA0(void)
 {
+    dah2_capture_15eca0_stage(0x0015ECA0u, MEM32(ecx));
     { uint32_t _icall_esp = g_esp;
     PUSH32(esp, ecx);
     PUSH32(esp, esi);
@@ -3619,6 +4661,7 @@ void sub_0015ECA0(void)
     }
 
 loc_0015ECAD: ;
+    dah2_capture_15eca0_stage(0x0015ECADu, MEM32(esi + 0x278));
     eax = MEM32(esi + 0x278);
     if (eax != 0) {
         edx = MEM32(esi);
@@ -3639,11 +4682,13 @@ loc_0015ECAD: ;
     }
 
 loc_0015ECD1: ;
+    dah2_capture_15eca0_stage(0x0015ECD1u, MEM32(esi + 0x524));
     eax = MEM32(esi + 0x524);
     MEM32(esp + 4) = 0;
     if (!CMP_BE(eax, 0)) {
         do {
         loc_0015ECE7: ;
+            dah2_capture_15eca0_stage(0x0015ECE7u, MEM32(MEM32(esi) + 0x58));
             edx = MEM32(esi);
             eax = esp + 4;
             { uint32_t _icall_esp = g_esp;
@@ -3653,6 +4698,7 @@ loc_0015ECD1: ;
             }
 
         loc_0015ECF3: ;
+            dah2_capture_15eca0_stage(0x0015ECF3u, MEM8(eax + 0xAC));
             ecx = MEM8(eax + 0xAC);
             if (LO8(ecx) != 0) {
                 edx = MEM32(esi);
@@ -3747,6 +4793,7 @@ loc_0015ECD1: ;
             }
 
         loc_0015ED9D: ;
+            dah2_capture_15eca0_stage(0x0015ED9Du, MEM32(esp + 4));
             eax = MEM32(esp + 4);
             ecx = MEM32(esi + 0x524);
             eax++;
@@ -3755,7 +4802,9 @@ loc_0015ECD1: ;
     }
 
 loc_0015EDB4: ;
+    dah2_capture_15eca0_stage(0x0015EDB4u, MEM32(esi + 0x278));
     edx = MEM32(esi);
+    dah2_capture_15eca0_stage(0x1015EDB4u, MEM32(edx));
     { uint32_t _icall_esp = g_esp;
     PUSH32(esp, 0x2CA6BC);
     ecx = esi;
@@ -3763,9 +4812,11 @@ loc_0015EDB4: ;
     }
 
 loc_0015EDBF: ;
+    dah2_capture_15eca0_stage(0x0015EDBFu, MEM32(esi + 0x278));
     eax = MEM32(esi + 0x278);
     if (eax != 0) {
         eax = MEM32(esi);
+        dah2_capture_15eca0_stage(0x0015EDC9u, MEM32(eax + 4));
         { uint32_t _icall_esp = g_esp;
         PUSH32(esp, 4);
         ecx = esi;
@@ -3773,8 +4824,10 @@ loc_0015EDBF: ;
         }
 
     loc_0015EDD2: ;
+        dah2_capture_15eca0_stage(0x0015EDD2u, MEM32(esi + 0x278));
         ecx = MEM32(esi + 0x278);
         edx = MEM32(ecx);
+        dah2_capture_15eca0_stage(0x1015EDD2u, MEM32(edx));
         { uint32_t _icall_esp = g_esp;
         PUSH32(esp, 0x2CA6BC);
         PUSH32(esp, 2);
@@ -3783,6 +4836,7 @@ loc_0015EDBF: ;
     }
 
 loc_0015EDE3: ;
+    dah2_capture_15eca0_stage(0x0015EDE3u, MEM32(esi + 0xD4));
     MEM32(esi + 0xD4) = MEM32(esi + 0xD4) + 1;
     POP32(esp, esi);
     POP32(esp, ecx);
@@ -4073,6 +5127,7 @@ loc_0013982B: ;
  * looks like immediately before/after each nested call. */
 void sub_001A7920(void)
 {
+    ++g_dah2_title_update_calls;
     dah2_parity_checkpoint("title_update_entry", 0x1A7920u, g_ebp, 64);
     uint32_t esp_before_push_esi = esp;
     PUSH32(esp, esi);
@@ -4105,6 +5160,7 @@ void sub_001A7920(void)
     }
 
     dah2_parity_checkpoint("title_ready_commit", 0x1A794Bu, g_ebp, 256);
+    ++g_dah2_title_ready_commits;
     MEM8(0x31D9B8) = MEM8(0x31D9B8) | 1;
     MEM32(0x31D9BC) = 2;
     SET_LO8(eax, 1);
@@ -4127,6 +5183,12 @@ void sub_001A7E30(void)
     (void)_flags; (void)_fa; (void)_fb; (void)_fas; (void)_fbs;
 
 loc_001A7E30: ;
+    if (g_dah2_title_remove_calls < 32u) {
+        g_dah2_title_remove_surfaces[g_dah2_title_remove_calls] = MEM32(esp + 4);
+        g_dah2_title_remove_callsites[g_dah2_title_remove_calls] = MEM32(esp);
+    }
+    ++g_dah2_title_remove_calls;
+    g_dah2_title_remove_count_before = MEM32(0x31D9D0);
     PUSH32(esp, esi);
     PUSH32(esp, 0x001A7E36u); sub_001552D0(); /* call 0x001552D0 */
 
@@ -4187,6 +5249,7 @@ loc_001A7E8B: ;
     goto loc_001A7E8F;
 
 loc_001A7E8D: ;
+    ++g_dah2_title_remove_matches;
     esi = eax;
 
 loc_001A7E8F: ;
@@ -4208,10 +5271,24 @@ loc_001A7E95: ;
     PUSH32(esp, 0x001A7EACu); sub_000D5A50(); /* call 0x000D5A50 */
 
 loc_001A7EAC: ;
+    g_dah2_title_remove_count_after = MEM32(0x31D9D0);
     POP32(esp, esi);
     esp += 8; return; /* ret 4 */
 
 }
+static void dah2_capture_15eca0_stage(uint32_t stage, uint32_t aux)
+{
+    if (g_dah2_postloader_stack_calls >= 6u) {
+        uint32_t slot = g_dah2_return_landmark_calls++;
+        if (slot < 128u) {
+            volatile uint32_t *row = g_dah2_return_landmark_trace[slot];
+            row[0]=stage; row[1]=g_dah2_postloader_stack_calls; row[2]=aux;
+            row[3]=g_eax; row[4]=g_ecx; row[5]=g_edx; row[6]=g_esp;
+            row[7]=g_esi; row[8]=MEM32(g_esi + 0x524);
+        }
+    }
+}
+
 
 /* Retail title-surface callback recovered from 0x001A7EB0-0x001A7F60.
  * Registered indirectly by sub_001A7F70; appends a 16-byte movie surface
@@ -4227,6 +5304,12 @@ void sub_001A7EB0(void)
     (void)_flags; (void)_fa; (void)_fb; (void)_fas; (void)_fbs;
 
 loc_001A7EB0: ;
+    if (g_dah2_title_append_calls < 32u) {
+        g_dah2_title_append_sizes[g_dah2_title_append_calls] = g_esi;
+        g_dah2_title_append_callsites[g_dah2_title_append_calls] = MEM32(esp + 0xC);
+    }
+    ++g_dah2_title_append_calls;
+    g_dah2_title_append_count_before = MEM32(0x31D9D0);
     esp = esp - 0x10;
     PUSH32(esp, esi);
     PUSH32(esp, edi);
@@ -4272,6 +5355,8 @@ loc_001A7EED: ;
     if (TEST_NZ(_fa, _fb)) goto loc_001A7EFB; /* jne: not equal / not zero */
 
 loc_001A7EF1: ;
+    ++g_dah2_title_append_rejected;
+    g_dah2_title_append_count_after = MEM32(0x31D9D0);
     eax = 0; /* xor self */
     POP32(esp, edi);
     POP32(esp, esi);
@@ -4323,10 +5408,636 @@ loc_001A7F42: ;
     MEM32(esi + 0xC) = ecx;
 
 loc_001A7F59: ;
+    if (g_dah2_title_append_successes < 32u) {
+        g_dah2_title_append_surfaces[g_dah2_title_append_successes] = MEM32(esi);
+    }
+    ++g_dah2_title_append_successes;
+    g_dah2_title_append_count_after = MEM32(0x31D9D0);
     POP32(esp, edi);
     POP32(esp, esi);
     esp = esp + 0x10;
     esp += 8; return; /* ret 4 */
+
+}
+
+/* Retail Bink audio-buffer destructor at 0x00283AF0-0x00283B6D.
+ * The constructor installs this at vtable slot +0x1C, but the address was not
+ * discovered as a function entry, so shutdown silently skipped the indirect
+ * call and retained one 0x1A000-byte title surface per movie. */
+void sub_00283AF0(void)
+{
+    int _flags = 0;
+    uint32_t _fa = 0, _fb = 0;
+    int32_t _fas = 0, _fbs = 0;
+    (void)_flags; (void)_fa; (void)_fb; (void)_fas; (void)_fbs;
+
+loc_00283AF0: ;
+    PUSH32(esp, esi);
+    esi = MEM32(esp + 8);
+    eax = MEM32(esi + 0x7C);
+    _fa = (uint32_t)eax; _fb = (uint32_t)eax;
+    _fas = (int32_t)_fa; _fbs = (int32_t)_fb;
+    if (TEST_Z(_fa, _fb)) goto loc_00283B69;
+
+loc_00283AFC: ;
+    PUSH32(esp, eax);
+    PUSH32(esp, 0x00283B02u); sub_00263885();
+
+loc_00283B02: ;
+    MEM32(esi + 0xA4) = 1;
+    ecx = MEM32(esi + 0x7C);
+    PUSH32(esp, ecx);
+    PUSH32(esp, 0x00283B15u); sub_0026261C();
+
+loc_00283B15: ;
+    edx = MEM32(esi + 0x80);
+    PUSH32(esp, edx);
+    MEM32(esi + 0x7C) = 0;
+    PUSH32(esp, 0x00283B28u); sub_00204DE0();
+
+loc_00283B28: ;
+    ecx = MEM32(0x32F994);
+    eax = MEM32(0x32F9AC);
+    ecx--;
+    eax--;
+    MEM32(0x32F994) = ecx;
+    MEM32(0x32F9AC) = eax;
+    if (eax != 0) goto loc_00283B69;
+
+loc_00283B42: ;
+    eax = MEM32(0x32F990);
+    _fa = (uint32_t)eax; _fb = (uint32_t)eax;
+    _fas = (int32_t)_fa; _fbs = (int32_t)_fb;
+    if (TEST_Z(_fa, _fb)) goto loc_00283B69;
+
+loc_00283B4B: ;
+    eax = MEM32(0x32F98C);
+    _fa = (uint32_t)eax; _fb = (uint32_t)eax;
+    _fas = (int32_t)_fa; _fbs = (int32_t)_fb;
+    if (TEST_Z(_fa, _fb)) goto loc_00283B69;
+
+loc_00283B54: ;
+    _fa = (uint32_t)eax; _fb = 0xFFFFFFFFu;
+    _fas = (int32_t)_fa; _fbs = (int32_t)_fb;
+    if (CMP_EQ(_fa, _fb)) goto loc_00283B69;
+
+loc_00283B59: ;
+    PUSH32(esp, eax);
+    PUSH32(esp, 0x00283B5Fu); sub_00262601();
+
+loc_00283B5F: ;
+    MEM32(0x32F98C) = 0xFFFFFFFFu;
+
+loc_00283B69: ;
+    POP32(esp, esi);
+    esp += 8; return;
+}
+/* Retail Bink shutdown, restored through 0x00283216.  The generated extent
+ * stopped at 0x00283121 and tail-called unresolved one-line stubs, leaking the
+ * movie surfaces before the title renderer could remove their descriptors. */
+void sub_002830F0(void)
+{
+    uint32_t ebp;
+    ebp = g_ebp;  /* frameless: caller's frame */
+    int _flags = 0; /* fallback flag var */
+    uint32_t _fa = 0, _fb = 0;
+    int32_t _fas = 0, _fbs = 0;
+    (void)_fa; (void)_fb; (void)_fas; (void)_fbs;
+    int _cf = 0; /* carry flag */
+    ebp = g_seh_ebp; /* fpo_leaf: inherit caller's frame */
+
+loc_002830F0: ;
+    PUSH32(esp, ebp);
+    PUSH32(esp, esi);
+    esi = MEM32(esp + 0xC);
+    ebp = 0; /* xor self */
+    _fa = (uint32_t)(esi) & 0xFFFFFFFFu; _fb = (uint32_t)(ebp) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp esi, ebp (32-bit) */
+    _cf = (int)(_fa < _fb); /* cmp borrow */
+    if (CMP_EQ(_fa, _fb)) goto loc_00283211; /* je: equal / zero */
+
+loc_00283100: ;
+    PUSH32(esp, 1);
+    PUSH32(esp, esi);
+    PUSH32(esp, 0x00283108u); sub_00282630(); /* call 0x00282630 */
+
+loc_00283108: ;
+    _fa = (uint32_t)(MEM32(esi + 0x20)) & 0xFFFFFFFFu; _fb = (uint32_t)(0x8000000) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* test MEM32(esi + 0x20), 0x8000000 (32-bit) */
+    _cf = 0; /* test clears CF */
+    if (TEST_NZ(_fa, _fb)) goto loc_00283121; /* jne: not equal / not zero */
+
+loc_00283111: ;
+    _fa = (uint32_t)(MEM32(esi + 0x108)) & 0xFFFFFFFFu; _fb = (uint32_t)(ebp) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp MEM32(esi + 0x108), ebp (32-bit) */
+    _cf = (int)(_fa < _fb); /* cmp borrow */
+    if (CMP_NE(_fa, _fb)) goto loc_00283121; /* jne: not equal / not zero */
+
+loc_00283119: ;
+    ecx = MEM32(0x32BF4C);
+    goto loc_00283123;
+
+loc_00283121: ;
+    ecx = 0; /* xor self */
+
+loc_00283123: ;
+    eax = MEM32(esi + 0x300);
+    edx = MEM32(0x32BF50);
+    _cf = (int)((eax) != 0);
+    eax = (uint32_t)(-(int32_t)eax);
+    eax = _cf ? 0xFFFFFFFF : 0; /* sbb self (CF extend) */
+    _cf = 0; /* logical op clears CF */
+    eax = eax & edx;
+    PUSH32(esp, 1);
+    edx = esi + 0x358;
+    PUSH32(esp, edx);
+    PUSH32(esp, eax);
+    eax = esi + 0x20C;
+    PUSH32(esp, eax);
+    PUSH32(esp, ecx);
+    PUSH32(esp, 0x0028314Cu); sub_002844F0(); /* call 0x002844F0 */
+
+loc_0028314C: ;
+    eax--;
+    if ((eax == 0)) goto loc_0028315B; /* je: equal / zero */
+
+loc_0028314F: ;
+    eax--;
+    if ((eax == 0)) goto loc_002831CD; /* je: equal / zero */
+
+loc_00283152: ;
+    eax--;
+    if ((eax != 0)) goto loc_00283161; /* jne: not equal / not zero */
+
+loc_00283155: ;
+    MEM32(0x32BF50) = ebp;
+
+loc_0028315B: ;
+    MEM32(0x32BF4C) = ebp;
+
+loc_00283161: ;
+    eax = MEM32(esi + 0x300);
+    PUSH32(esp, ebx);
+    ebx = 0; /* xor self */
+    _fa = (uint32_t)(eax) & 0xFFFFFFFFu; _fb = (uint32_t)(ebp) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp eax, ebp (32-bit) */
+    _cf = (int)(_fa < _fb); /* cmp borrow */
+    PUSH32(esp, edi);
+    if (CMP_BE(_fa, _fb)) goto loc_002831B3; /* jbe: below or equal (unsigned <=) */
+
+loc_0028316F: ;
+    edi = 0; /* xor self */
+
+loc_00283171: ;
+    ecx = MEM32(esi + 0x308);
+    eax = edi + ecx;
+    { uint32_t _icall_esp = g_esp;
+    PUSH32(esp, eax);
+    { uint32_t _icall_target = MEM32(eax + 0x1C); PUSH32(esp, 0x0028317Eu); RECOMP_ICALL_SAFE(_icall_target, _icall_esp); } /* indirect call */
+    }
+
+loc_0028317E: ;
+    edx = MEM32(esi + 0x308);
+    eax = MEM32(edi + edx + 0x3C);
+    PUSH32(esp, eax);
+    PUSH32(esp, 0x0028318Eu); sub_00285270(); /* call 0x00285270 */
+
+loc_0028318E: ;
+    ecx = MEM32(esi + 0x308);
+    eax = MEM32(edi + ecx + 0x2C);
+    _fa = (uint32_t)(eax) & 0xFFFFFFFFu; _fb = (uint32_t)(ebp) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp eax, ebp (32-bit) */
+    _cf = (int)(_fa < _fb); /* cmp borrow */
+    if (CMP_EQ(_fa, _fb)) goto loc_002831A2; /* je: equal / zero */
+
+loc_0028319C: ;
+    PUSH32(esp, eax);
+    PUSH32(esp, 0x002831A2u); sub_00204DE0(); /* call 0x00204DE0 */
+
+loc_002831A2: ;
+    eax = MEM32(esi + 0x300);
+    ebx++;
+    _cf = (int)((((uint64_t)(edi) + (uint64_t)(0x17C)) >> 32) & 1);
+    edi = edi + 0x17C;
+    _fa = (uint32_t)(ebx) & 0xFFFFFFFFu; _fb = (uint32_t)(eax) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp ebx, eax (32-bit) */
+    _cf = (int)(_fa < _fb); /* cmp borrow */
+    if (CMP_B(_fa, _fb)) goto loc_00283171; /* jb: below (unsigned <) */
+
+loc_002831B3: ;
+    PUSH32(esp, 0x002831B8u); sub_00289420(); /* call 0x00289420 */
+
+loc_002831B8: ;
+    eax = MEM32(esi + 0x108);
+    _fa = (uint32_t)(eax) & 0xFFFFFFFFu; _fb = (uint32_t)(ebp) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp eax, ebp (32-bit) */
+    _cf = (int)(_fa < _fb); /* cmp borrow */
+    if (CMP_EQ(_fa, _fb)) goto loc_002831D5; /* je: equal / zero */
+
+loc_002831C2: ;
+    _fa = (uint32_t)(MEM32(esi + 0x20)) & 0xFFFFFFFFu; _fb = (uint32_t)(0x4000000) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* test MEM32(esi + 0x20), 0x4000000 (32-bit) */
+    _cf = 0; /* test clears CF */
+    if (TEST_NZ(_fa, _fb)) goto loc_002831EE; /* jne: not equal / not zero */
+
+loc_002831CB: ;
+    goto loc_002831E8;
+
+loc_002831CD: ;
+    MEM32(0x32BF50) = ebp;
+    goto loc_00283161;
+
+loc_002831D5: ;
+    edx = esi + 0x110;
+    { uint32_t _icall_esp = g_esp;
+    PUSH32(esp, edx);
+    { uint32_t _icall_target = MEM32(esi + 0x124); PUSH32(esp, 0x002831E2u); RECOMP_ICALL_SAFE(_icall_target, _icall_esp); } /* indirect call */
+    }
+
+loc_002831E2: ;
+    eax = MEM32(esi + 0x24C);
+
+loc_002831E8: ;
+    PUSH32(esp, eax);
+    PUSH32(esp, 0x002831EEu); sub_00204DE0(); /* call 0x00204DE0 */
+
+loc_002831EE: ;
+    eax = MEM32(esi + 0xBC);
+    _fa = (uint32_t)(eax) & 0xFFFFFFFFu; _fb = (uint32_t)(ebp) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp eax, ebp (32-bit) */
+    _cf = (int)(_fa < _fb); /* cmp borrow */
+    if (CMP_EQ(_fa, _fb)) goto loc_002831FE; /* je: equal / zero */
+
+loc_002831F8: ;
+    PUSH32(esp, eax);
+    PUSH32(esp, 0x002831FEu); sub_00204DE0(); /* call 0x00204DE0 */
+
+loc_002831FE: ;
+    eax = 0; /* xor self */
+    ecx = 0xE6;
+    edi = esi;
+    PUSH32(esp, esi);
+    { uint32_t _i; for (_i = 0; _i < ecx; _i++) MEM32(edi + _i*4) = eax; }
+    edi += ecx * 4; ecx = 0; /* rep stosd */
+    PUSH32(esp, 0x0028320Fu); sub_00204DE0(); /* call 0x00204DE0 */
+
+loc_0028320F: ;
+    POP32(esp, edi);
+    POP32(esp, ebx);
+
+loc_00283211: ;
+    POP32(esp, esi);
+    POP32(esp, ebp);
+    esp += 8; return; /* ret 4 */
+
+}
+
+/* Retail vtable 2BA738+14; 239 bytes SHA256 b93960e62d4221da737c19ea0911bf4158c235646035a18eaf1deee79072e372. */
+extern void sub_00267A94(void);
+extern void sub_00267732(void);
+extern void sub_002687EF(void);
+extern void sub_002696A4(void);
+/**
+ * sub_00267D4D
+ * Original: 0x00267D4D - 0x00267E3C (239 bytes, 74 insns)
+ * CC: cdecl, 0 params, returns int_or_void
+ * Frame: fpo_leaf
+ */
+void sub_00267D4D(void)
+{
+    uint32_t ebp;
+    ebp = g_ebp;  /* frameless: caller's frame */
+    int _flags = 0; /* fallback flag var */
+    uint32_t _fa = 0, _fb = 0;
+    int32_t _fas = 0, _fbs = 0;
+    (void)_fa; (void)_fb; (void)_fas; (void)_fbs;
+    ebp = g_seh_ebp; /* fpo_leaf: inherit caller's frame */
+
+loc_00267D4D: ;
+    PUSH32(g_esp, g_esi);
+    g_esi = g_ecx;
+    g_eax = 0; /* xor self */
+    SET_LO8(g_eax, MEM8(g_esi + 0x12));
+    PUSH32(g_esp, g_edi);
+    g_eax = g_eax & 1;
+    g_edi = g_eax;
+    if ((g_eax == 0)) goto loc_00267D7F; /* je: equal / zero */
+
+loc_00267D5D: ;
+    PUSH32(g_esp, 0);
+    PUSH32(g_esp, 0x00267D64u); sub_00267A94(); /* call 0x00267A94 */
+
+loc_00267D64: ;
+    g_eax = MEM32(g_esi + 0x80);
+    g_eax = ZX8(MEM8(g_eax + 0xE));
+    g_eax--;
+    g_eax = (uint32_t)((int32_t)g_eax >> 1);
+    SET_LO8(g_eax, LO8(g_eax) + 1);
+    _fa = (uint32_t)(LO8(g_eax)) & 0xFFu; _fb = (uint32_t)(MEM8(g_esi + 0x64)) & 0xFFu;
+    _fas = (int32_t)(int8_t)(_fa); _fbs = (int32_t)(int8_t)(_fb); /* cmp LO8(g_eax), MEM8(g_esi + 0x64) (8-bit) */
+    if (CMP_EQ(_fa, _fb)) goto loc_00267D7F; /* je: equal / zero */
+
+loc_00267D78: ;
+    g_ecx = g_esi;
+    PUSH32(g_esp, 0x00267D7Fu); sub_00267732(); /* call 0x00267732 */
+
+loc_00267D7F: ;
+    g_ecx = g_esi;
+    PUSH32(g_esp, 0x00267D86u); sub_002687EF(); /* call 0x002687EF */
+
+loc_00267D86: ;
+    _fa = (uint32_t)(g_eax) & 0xFFFFFFFFu; _fb = (uint32_t)(g_eax) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* test g_eax, g_eax (32-bit) */
+    if (TEST_S(_fas, _fbs)) goto loc_00267E39; /* jl: less (signed <) */
+
+loc_00267D8E: ;
+    g_edx = MEM32(g_esi + 0x80);
+    g_ecx = ZX16(MEM16(g_edx + 0xC));
+    g_ecx--;
+    PUSH32(g_esp, g_ebx);
+    if ((g_ecx == 0)) goto loc_00267DB9; /* je: equal / zero */
+
+loc_00267D9C: ;
+    g_ecx = g_ecx - 0x68;
+    if ((g_ecx != 0)) goto loc_00267DF1; /* jne: not equal / not zero */
+
+loc_00267DA1: ;
+    g_ecx = g_esi + 0x84;
+    g_ebx = MEM32(g_ecx);
+    g_ebx = g_ebx & 0xFFFEFFFFu;
+    g_ebx = g_ebx | 0x20000;
+
+loc_00267DB5: ;
+    MEM32(g_ecx) = g_ebx;
+    goto loc_00267DF1;
+
+loc_00267DB9: ;
+    SET_LO8(g_ecx, MEM8(g_edx + 0xF));
+    _fa = (uint32_t)(LO8(g_ecx)) & 0xFFu; _fb = (uint32_t)(8) & 0xFFu;
+    _fas = (int32_t)(int8_t)(_fa); _fbs = (int32_t)(int8_t)(_fb); /* cmp LO8(g_ecx), 8 (8-bit) */
+    if (CMP_EQ(_fa, _fb)) goto loc_00267DEA; /* je: equal / zero */
+
+loc_00267DC1: ;
+    _fa = (uint32_t)(LO8(g_ecx)) & 0xFFu; _fb = (uint32_t)(0x10) & 0xFFu;
+    _fas = (int32_t)(int8_t)(_fa); _fbs = (int32_t)(int8_t)(_fb); /* cmp LO8(g_ecx), 0x10 (8-bit) */
+    if (CMP_EQ(_fa, _fb)) goto loc_00267DD4; /* je: equal / zero */
+
+loc_00267DC6: ;
+    _fa = (uint32_t)(LO8(g_ecx)) & 0xFFu; _fb = (uint32_t)(0x20) & 0xFFu;
+    _fas = (int32_t)(int8_t)(_fa); _fbs = (int32_t)(int8_t)(_fb); /* cmp LO8(g_ecx), 0x20 (8-bit) */
+    if (CMP_NE(_fa, _fb)) goto loc_00267DF1; /* jne: not equal / not zero */
+
+loc_00267DCB: ;
+    MEM8(g_esi + 0x86) = MEM8(g_esi + 0x86) | 3;
+    goto loc_00267DF1;
+
+loc_00267DD4: ;
+    g_ecx = g_esi + 0x84;
+    g_ebx = MEM32(g_ecx);
+    g_ebx = g_ebx & 0xFFFDFFFFu;
+    g_ebx = g_ebx | 0x10000;
+    goto loc_00267DB5;
+
+loc_00267DEA: ;
+    MEM8(g_esi + 0x86) = MEM8(g_esi + 0x86) & 0xFC;
+
+loc_00267DF1: ;
+    g_ecx = ZX8(MEM8(g_edx + 0xE));
+    g_ecx--;
+    g_ecx = g_ecx << 0x12;
+    g_ecx = g_ecx ^ MEM32(g_esi + 0x84);
+    POP32(g_esp, g_ebx);
+    g_ecx = g_ecx & 0x7C0000;
+    MEM32(g_esi + 0x84) = MEM32(g_esi + 0x84) ^ g_ecx;
+    _fa = (uint32_t)(MEM8(g_edx + 0xE)) & 0xFFu; _fb = (uint32_t)(1) & 0xFFu;
+    _fas = (int32_t)(int8_t)(_fa); _fbs = (int32_t)(int8_t)(_fb); /* cmp MEM8(g_edx + 0xE), 1 (8-bit) */
+    g_ecx = MEM32(g_esi + 0x84);
+    if (CMP_BE(_fa, _fb)) goto loc_00267E20; /* jbe: below or equal (unsigned <=) */
+
+loc_00267E18: ;
+    g_ecx = g_ecx | 0x800000;
+    goto loc_00267E26;
+
+loc_00267E20: ;
+    g_ecx = g_ecx & 0xFF7FFFFFu;
+
+loc_00267E26: ;
+    _fa = (uint32_t)(g_edi) & 0xFFFFFFFFu; _fb = (uint32_t)(g_edi) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* test g_edi, g_edi (32-bit) */
+    MEM32(g_esi + 0x84) = g_ecx;
+    if (TEST_Z(_fa, _fb)) goto loc_00267E39; /* je: equal / zero */
+
+loc_00267E30: ;
+    POP32(g_esp, g_edi);
+    g_ecx = g_esi;
+    POP32(g_esp, g_esi);
+    g_seh_ebp = ebp; sub_002696A4(); return; /* tail jmp 0x002696A4 */
+
+loc_00267E39: ;
+    POP32(g_esp, g_edi);
+    POP32(g_esp, g_esi);
+    g_esp += 4; return; /* ret */
+
+}
+
+/* Retail registered scene factory: 314 bytes, 102 instructions.
+ * SHA256 d4fffd395dd055fd0fe32f34fd1b9d31a6ed982ba2ef4e55f37b6e014ea2ac95; no guessed objects or argument cleanup. */
+extern void sub_000B3850(void);
+extern void sub_000B3F90(void);
+extern void sub_000B3BE0(void);
+extern void sub_000B3F20(void);
+extern void sub_000B40C0(void);
+extern void sub_000B3F60(void);
+/**
+ * sub_000B3500
+ * Original: 0x000B3500 - 0x000B363A (314 bytes, 102 insns)
+ * CC: cdecl, 0 params, returns int_or_void
+ * Frame: fpo_leaf
+ */
+void sub_000B3500(void)
+{
+    int _flags = 0; /* fallback flag var */
+    uint32_t _fa = 0, _fb = 0;
+    int32_t _fas = 0, _fbs = 0;
+    (void)_fa; (void)_fb; (void)_fas; (void)_fbs;
+
+loc_000B3500: ;
+    _fa = (uint32_t)(g_ecx) & 0xFFFFFFFFu; _fb = (uint32_t)(0x6E736988) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp g_ecx, 0x6E736988 (32-bit) */
+    PUSH32(g_esp, g_esi);
+    g_esi = g_edx;
+    if (CMP_A(_fa, _fb)) goto loc_000B35D9; /* ja: above (unsigned >) */
+
+loc_000B350F: ;
+    if (CMP_EQ(_fa, _fb)) goto loc_000B35B2; /* je: equal / zero */
+
+loc_000B3515: ;
+    _fa = (uint32_t)(g_ecx) & 0xFFFFFFFFu; _fb = (uint32_t)(0x46D1D806) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp g_ecx, 0x46D1D806 (32-bit) */
+    if (CMP_EQ(_fa, _fb)) goto loc_000B3587; /* je: equal / zero */
+
+loc_000B351D: ;
+    _fa = (uint32_t)(g_ecx) & 0xFFFFFFFFu; _fb = (uint32_t)(0x4D9F7C0E) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp g_ecx, 0x4D9F7C0E (32-bit) */
+    if (CMP_EQ(_fa, _fb)) goto loc_000B355C; /* je: equal / zero */
+
+loc_000B3525: ;
+    _fa = (uint32_t)(g_ecx) & 0xFFFFFFFFu; _fb = (uint32_t)(0x57CD50F7) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp g_ecx, 0x57CD50F7 (32-bit) */
+    if (CMP_NE(_fa, _fb)) goto loc_000B3634; /* jne: not equal / not zero */
+
+loc_000B3531: ;
+    PUSH32(g_esp, 0x90);
+    PUSH32(g_esp, 0x000B353Bu); sub_000F96C0(); /* call 0x000F96C0 */
+
+loc_000B353B: ;
+    g_esp = g_esp + 4;
+    _fa = (uint32_t)(g_eax) & 0xFFFFFFFFu; _fb = (uint32_t)(g_eax) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* test g_eax, g_eax (32-bit) */
+    if (TEST_Z(_fa, _fb)) goto loc_000B3634; /* je: equal / zero */
+
+loc_000B3546: ;
+    g_ecx = MEM32(g_esp + 0xC);
+    g_edx = MEM32(g_esp + 8);
+    PUSH32(g_esp, g_ecx);
+    PUSH32(g_esp, g_edx);
+    PUSH32(g_esp, g_esi);
+    g_ecx = g_eax;
+    PUSH32(g_esp, 0x000B3558u); sub_000B3850(); /* call 0x000B3850 */
+
+loc_000B3558: ;
+    POP32(g_esp, g_esi);
+    g_esp += 12; return; /* ret 8 */
+
+loc_000B355C: ;
+    PUSH32(g_esp, 0x8C);
+    PUSH32(g_esp, 0x000B3566u); sub_000F96C0(); /* call 0x000F96C0 */
+
+loc_000B3566: ;
+    g_esp = g_esp + 4;
+    _fa = (uint32_t)(g_eax) & 0xFFFFFFFFu; _fb = (uint32_t)(g_eax) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* test g_eax, g_eax (32-bit) */
+    if (TEST_Z(_fa, _fb)) goto loc_000B3634; /* je: equal / zero */
+
+loc_000B3571: ;
+    g_ecx = MEM32(g_esp + 0xC);
+    g_edx = MEM32(g_esp + 8);
+    PUSH32(g_esp, g_ecx);
+    PUSH32(g_esp, g_edx);
+    PUSH32(g_esp, g_esi);
+    g_ecx = g_eax;
+    PUSH32(g_esp, 0x000B3583u); sub_000B3F90(); /* call 0x000B3F90 */
+
+loc_000B3583: ;
+    POP32(g_esp, g_esi);
+    g_esp += 12; return; /* ret 8 */
+
+loc_000B3587: ;
+    PUSH32(g_esp, 0x8C);
+    PUSH32(g_esp, 0x000B3591u); sub_000F96C0(); /* call 0x000F96C0 */
+
+loc_000B3591: ;
+    g_esp = g_esp + 4;
+    _fa = (uint32_t)(g_eax) & 0xFFFFFFFFu; _fb = (uint32_t)(g_eax) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* test g_eax, g_eax (32-bit) */
+    if (TEST_Z(_fa, _fb)) goto loc_000B3634; /* je: equal / zero */
+
+loc_000B359C: ;
+    g_ecx = MEM32(g_esp + 0xC);
+    g_edx = MEM32(g_esp + 8);
+    PUSH32(g_esp, g_ecx);
+    PUSH32(g_esp, g_edx);
+    PUSH32(g_esp, g_esi);
+    g_ecx = g_eax;
+    PUSH32(g_esp, 0x000B35AEu); sub_000B3BE0(); /* call 0x000B3BE0 */
+
+loc_000B35AE: ;
+    POP32(g_esp, g_esi);
+    g_esp += 12; return; /* ret 8 */
+
+loc_000B35B2: ;
+    PUSH32(g_esp, 0x8C);
+    PUSH32(g_esp, 0x000B35BCu); sub_000F96C0(); /* call 0x000F96C0 */
+
+loc_000B35BC: ;
+    g_esp = g_esp + 4;
+    _fa = (uint32_t)(g_eax) & 0xFFFFFFFFu; _fb = (uint32_t)(g_eax) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* test g_eax, g_eax (32-bit) */
+    if (TEST_Z(_fa, _fb)) goto loc_000B3634; /* je: equal / zero */
+
+loc_000B35C3: ;
+    g_ecx = MEM32(g_esp + 0xC);
+    g_edx = MEM32(g_esp + 8);
+    PUSH32(g_esp, g_ecx);
+    PUSH32(g_esp, g_edx);
+    PUSH32(g_esp, g_esi);
+    g_ecx = g_eax;
+    PUSH32(g_esp, 0x000B35D5u); sub_000B3F20(); /* call 0x000B3F20 */
+
+loc_000B35D5: ;
+    POP32(g_esp, g_esi);
+    g_esp += 12; return; /* ret 8 */
+
+loc_000B35D9: ;
+    _fa = (uint32_t)(g_ecx) & 0xFFFFFFFFu; _fb = (uint32_t)(0x79CB183E) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp g_ecx, 0x79CB183E (32-bit) */
+    if (CMP_EQ(_fa, _fb)) goto loc_000B360D; /* je: equal / zero */
+
+loc_000B35E1: ;
+    _fa = (uint32_t)(g_ecx) & 0xFFFFFFFFu; _fb = (uint32_t)(0xBBF1AA61u) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* cmp g_ecx, 0xBBF1AA61u (32-bit) */
+    if (CMP_NE(_fa, _fb)) goto loc_000B3634; /* jne: not equal / not zero */
+
+loc_000B35E9: ;
+    PUSH32(g_esp, 0x78);
+    PUSH32(g_esp, 0x000B35F0u); sub_000F96C0(); /* call 0x000F96C0 */
+
+loc_000B35F0: ;
+    g_esp = g_esp + 4;
+    _fa = (uint32_t)(g_eax) & 0xFFFFFFFFu; _fb = (uint32_t)(g_eax) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* test g_eax, g_eax (32-bit) */
+    if (TEST_Z(_fa, _fb)) goto loc_000B3634; /* je: equal / zero */
+
+loc_000B35F7: ;
+    g_ecx = MEM32(g_esp + 0xC);
+    g_edx = MEM32(g_esp + 8);
+    PUSH32(g_esp, g_ecx);
+    PUSH32(g_esp, g_edx);
+    PUSH32(g_esp, g_esi);
+    g_ecx = g_eax;
+    PUSH32(g_esp, 0x000B3609u); sub_000B40C0(); /* call 0x000B40C0 */
+
+loc_000B3609: ;
+    POP32(g_esp, g_esi);
+    g_esp += 12; return; /* ret 8 */
+
+loc_000B360D: ;
+    PUSH32(g_esp, 0x8C);
+    PUSH32(g_esp, 0x000B3617u); sub_000F96C0(); /* call 0x000F96C0 */
+
+loc_000B3617: ;
+    g_esp = g_esp + 4;
+    _fa = (uint32_t)(g_eax) & 0xFFFFFFFFu; _fb = (uint32_t)(g_eax) & 0xFFFFFFFFu;
+    _fas = (int32_t)(int32_t)(_fa); _fbs = (int32_t)(int32_t)(_fb); /* test g_eax, g_eax (32-bit) */
+    if (TEST_Z(_fa, _fb)) goto loc_000B3634; /* je: equal / zero */
+
+loc_000B361E: ;
+    g_ecx = MEM32(g_esp + 0xC);
+    g_edx = MEM32(g_esp + 8);
+    PUSH32(g_esp, g_ecx);
+    PUSH32(g_esp, g_edx);
+    PUSH32(g_esp, g_esi);
+    g_ecx = g_eax;
+    PUSH32(g_esp, 0x000B3630u); sub_000B3F60(); /* call 0x000B3F60 */
+
+loc_000B3630: ;
+    POP32(g_esp, g_esi);
+    g_esp += 12; return; /* ret 8 */
+
+loc_000B3634: ;
+    g_eax = 0; /* xor self */
+    POP32(g_esp, g_esi);
+    g_esp += 12; return; /* ret 8 */
 
 }
 
@@ -4491,8 +6202,14 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
      * if (xbox_va == 0x000ABCDE) return fixed_sub_000ABCDE;
      */
 
+    if (xbox_va == 0x001A8EB0) return traced_sub_001A8EB0;
+    if (xbox_va == 0x000A5D30) return traced_sub_000A5D30;
+    if (xbox_va == 0x001040B0) return traced_sub_001040B0;
+    if (xbox_va == 0x001044C0) return traced_sub_001044C0;
     if (xbox_va == 0x001A7E30) return sub_001A7E30;
     if (xbox_va == 0x001A7EB0) return sub_001A7EB0;
+    if (xbox_va == 0x00283AF0) return sub_00283AF0;
+    if (xbox_va == 0x002830F0) return sub_002830F0;
     if (xbox_va == 0x002961C2) return sub_002961C2;
     if (xbox_va == 0x00296218) return sub_00296218;
     if (xbox_va == 0x00296224) return sub_00296224;
@@ -4507,6 +6224,8 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
     if (xbox_va == 0x000F2720) return traced_sub_000F2720;
     if (xbox_va == 0x001C7FB9) return override_sub_001C7FB9;
     if (xbox_va == 0x001C6A27) return sub_001C6A27;
+    if (xbox_va == 0x001C6AFA) return sub_001C6AFA;
+    if (xbox_va == 0x001C55FC) return sub_001C55FC;
     if (xbox_va == 0x000F78B0) return override_sub_000F78B0;
     if (xbox_va == 0x0008F860) return safe_sub_0008F860;
     if (xbox_va == 0x0003C080) return safe_sub_0003C080;
@@ -4522,6 +6241,8 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
     if (xbox_va == 0x00265790) return init_dsound_00265790;
     if (xbox_va == 0x00268750) return init_dsound_00268750;
     if (xbox_va == 0x0026875B) return init_dsound_0026875B;
+    if (xbox_va == 0x00267D4D) return sub_00267D4D;
+    if (xbox_va == 0x000B3500) return sub_000B3500;
     return (recomp_func_t)0;
 }
 

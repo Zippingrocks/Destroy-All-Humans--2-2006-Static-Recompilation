@@ -1,0 +1,2 @@
+# start duration buttons lt rt lx ly rx ry
+300 1 0010 0 0 0 0 0 0

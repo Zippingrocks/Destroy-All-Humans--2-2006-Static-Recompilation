@@ -16,11 +16,15 @@ const out=option('--out');
 const port=Number(option('--port','1236'));
 const seconds=Number(option('--seconds','5'));
 const bootSeconds=Number(option('--boot-seconds','0'));
+const watchText=option('--watch-address',null);
+const watchAddress=watchText===null?null:Number(watchText);
+const leaveStopped=args.includes('--leave-stopped');
 if(!script||!out)throw new Error('--script and --out are required');
 if(!fs.existsSync(script)||fs.existsSync(out))throw new Error('script must exist and output must be new');
 if(!Number.isSafeInteger(port)||port<1||port>65535)throw new Error('invalid port');
 if(!Number.isFinite(seconds)||seconds<1||seconds>60)throw new Error('invalid seconds');
 if(!Number.isFinite(bootSeconds)||bootSeconds<0||bootSeconds>120)throw new Error('invalid boot seconds');
+if(watchAddress!==null&&(!Number.isSafeInteger(watchAddress)||watchAddress<0||watchAddress>0xffffffff))throw new Error('invalid watch address');
 
 const events=[];
 for(const raw of fs.readFileSync(script,'utf8').split(/\r?\n/)){
@@ -39,14 +43,14 @@ for(const raw of fs.readFileSync(script,'utf8').split(/\r?\n/)){
 
 const fd=fs.openSync(out,'wx');
 const trace={schema:1,source:'dah2-xemu-logical-pad',port,script:path.resolve(script),
- inputBoundary:'0x00296224',startedAt:new Date().toISOString(),events:[],
+ inputBoundary:'0x00296224',watchAddress:watchAddress===null?null:`0x${watchAddress.toString(16).padStart(8,'0')}`,startedAt:new Date().toISOString(),events:[],
  limitation:'Synthetic XPP API results; excludes physical-controller fidelity and wall-clock timing because debugger stops perturb execution'};
 const socket=net.createConnection({host:'127.0.0.1',port});
 socket.setNoDelay(true);
 await new Promise((resolve,reject)=>{socket.once('connect',resolve);socket.once('error',reject);});
 const rsp=new RspClient(socket);
 const inputSite=0x296224;
-let armed=false,running=false,samples=0,packet=0,lastPad='';
+let armed=false,watchArmed=false,running=false,samples=0,packet=0,lastPad='';
 async function read(address,length){
  const reply=await rsp.packet(`m${address.toString(16)},${length.toString(16)}`);
  if(!/^[0-9a-f]+$/i.test(reply)||reply.length!==length*2)throw new Error(`guest read failed at 0x${address.toString(16)}`);
@@ -81,6 +85,10 @@ try{
  if(codeReply.toLowerCase()!==expectedInputCode)throw new Error('unexpected DAH2 XInputGetState bytes: '+codeReply);
  if(await rsp.packet(`Z1,${inputSite.toString(16)},1`)!=='OK')throw new Error('hardware breakpoint rejected');
  armed=true;
+ if(watchAddress!==null){
+  if(await rsp.packet(`Z2,${watchAddress.toString(16)},4`)!=='OK')throw new Error('hardware watchpoint rejected');
+  watchArmed=true;
+ }
  const deadline=performance.now()+seconds*1000;
  rsp.resume();running=true;
  while(performance.now()<deadline){
@@ -93,7 +101,13 @@ try{
   if(!/^[0-9a-f]+$/i.test(rawRegisters)||rawRegisters.length<80)throw new Error('unexpected i386 register packet');
   const registers=Buffer.from(rawRegisters,'hex');
   const eip=registers.readUInt32LE(32),esp=registers.readUInt32LE(16);
-  if(eip!==inputSite)throw new Error(`unexpected breakpoint stop at 0x${eip.toString(16)}`);
+  if(eip!==inputSite){
+   if(watchAddress===null)throw new Error(`unexpected breakpoint stop at 0x${eip.toString(16)}`);
+   trace.watchHit={eip:`0x${eip.toString(16).padStart(8,'0')}`,esp:`0x${esp.toString(16).padStart(8,'0')}`,
+    registers:rawRegisters,code:(await read((eip-32)>>>0,96)).toString('hex'),
+    stack:(await read(esp,128)).toString('hex'),matrix:(await read(watchAddress,64)).toString('hex')};
+   break;
+  }
   const stack=await read(esp,12),ret=stack.readUInt32LE(0),state=stack.readUInt32LE(8);
   const pad=Buffer.alloc(22);
   for(const event of events){
@@ -118,7 +132,9 @@ try{
 finally{
  if(running){socket.write(Buffer.from([3]));try{await rsp.nextPacket(5000);}catch{}}
  if(armed)try{await rsp.packet(`z1,${inputSite.toString(16)},1`);}catch{}
- rsp.resume();rsp.close();
+ if(watchArmed)try{await rsp.packet(`z2,${watchAddress.toString(16)},4`);}catch{}
+ if(!leaveStopped)rsp.resume();
+ rsp.close();
  trace.samples=samples;trace.finishedAt=new Date().toISOString();
  fs.writeSync(fd,JSON.stringify(trace,null,2)+'\n');fs.closeSync(fd);
  console.log(JSON.stringify(trace));

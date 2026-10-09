@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory = $true)]
-    [int]$ProcessId
+    [int]$ProcessId,
+    [switch]$IncludeRegisters
 )
 
 $source = @'
@@ -31,7 +32,7 @@ public static class NativeThreadSampler
     [DllImport("kernel32.dll")]
     static extern bool CloseHandle(IntPtr handle);
 
-    public static string[] Sample(int processId)
+    public static string[] Sample(int processId, bool includeRegisters = false)
     {
         var rows = new List<string>();
         using (var process = Process.GetProcessById(processId))
@@ -71,6 +72,16 @@ public static class NativeThreadSampler
                             threadInfo.TotalProcessorTime.TotalMilliseconds,
                             rip,
                             rsp));
+                        if (includeRegisters)
+                        {
+                            var registers = new List<string>();
+                            string[] names = {"rax","rcx","rdx","rbx","rsp","rbp","rsi","rdi",
+                                              "r8","r9","r10","r11","r12","r13","r14","r15"};
+                            for (int i = 0; i < names.Length; i++)
+                                registers.Add(String.Format("{0}=0x{1:X16}", names[i],
+                                    unchecked((ulong)Marshal.ReadInt64(context, 120 + i * 8))));
+                            rows.Add("tid=" + threadInfo.Id + " " + String.Join(" ", registers));
+                        }
                     }
                 }
                 finally
@@ -92,4 +103,4 @@ if (-not ('NativeThreadSampler' -as [type])) {
     Add-Type -TypeDefinition $source
 }
 
-[NativeThreadSampler]::Sample($ProcessId)
+[NativeThreadSampler]::Sample($ProcessId, [bool]$IncludeRegisters)

@@ -172,13 +172,18 @@ if ($Mode -eq 'LaunchXemu') {
         [string]$Environment['DAH2_TEST_WINDOW_HIDDEN'] -ne '1') {
         throw 'DAH2_INPUT_SCRIPT requires DAH2_TEST_WINDOW_HIDDEN=1 so scripted input cannot affect an ordinary player window.'
     }
+    if ($Environment.ContainsKey('DAH2_INPUT_SCRIPT')) {
+        $inputScript = [IO.Path]::GetFullPath([string]$Environment['DAH2_INPUT_SCRIPT'], $project)
+        Assert-PlainPath $inputScript $false
+        $Environment['DAH2_INPUT_SCRIPT'] = $inputScript
+    }
     if ($Environment.ContainsKey('DAH2_CAPTURE_PRESENT')) {
-        $captureTargets = @(([string]$Environment['DAH2_CAPTURE_PRESENT']).Split(','))
+        [string[]]$captureTargets = ([string]$Environment['DAH2_CAPTURE_PRESENT']).Split(',')
         $invalidCaptureTargets = @($captureTargets | Where-Object { $_ -notmatch '^[1-9][0-9]*$' })
         if ($captureTargets.Count -lt 1 -or $captureTargets.Count -gt 3 -or $invalidCaptureTargets.Count) {
             throw 'DAH2_CAPTURE_PRESENT accepts one to three comma-separated positive present numbers.'
         }
-        if (($captureTargets | Select-Object -Unique).Count -ne $captureTargets.Count) {
+        if (@($captureTargets | Select-Object -Unique).Count -ne $captureTargets.Count) {
             throw 'DAH2_CAPTURE_PRESENT targets must be unique.'
         }
     }
@@ -253,6 +258,16 @@ if ($kind -eq 'xemu') {
     $record.extractionSource = [IO.Path]::GetFullPath($ExtractionDirectory)
     $record.xbeSha256 = (Get-FileHash -LiteralPath (Join-Path $privateGameFiles 'default.xbe') -Algorithm SHA256).Hash
     $record.sharedOpticalSubdirectories = @('blocks', 'movies')
+    # Record only explicit, non-secret parity settings, never inherited host env.
+    $record.explicitEnvironment = [ordered]@{}
+    foreach ($key in @('DAH2_TEST_WINDOW_HIDDEN', 'DAH2_INPUT_SCRIPT',
+        'DAH2_CAPTURE_PRESENT', 'DAH2_PARITY_TIMING_MEMORY',
+        'DAH2_PARITY_STATE_MEMORY', 'DAH2_DRAW_STATE_MEMORY',
+        'DAH2_METHOD_HIST', 'DAH2_TIMING_LINK_WATCH')) {
+        if ($Environment.ContainsKey($key)) {
+            $record.explicitEnvironment[$key] = [string]$Environment[$key]
+        }
+    }
 }
 Write-NewJson (Join-Path $run 'prepared.json') $record
 if ($PrepareOnly) {

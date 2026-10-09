@@ -3,6 +3,7 @@
 #include "boot_window.h"
 #include "d3d8_xbox.h"
 #include "nv2a_pgraph_d3d11.h"
+#include "parity_state.h"
 #include "recomp/recomp_types.h"
 #include "trace_control.h"
 #include "xbox_memory_layout.h"
@@ -50,6 +51,21 @@ static Dah2GuestGpuBridge g_bridge = {
     .lock = SRWLOCK_INIT,
 };
 
+typedef struct Dah2PbPacketHistory {
+    uint32_t commit;
+    uint32_t packet_cursor;
+    uint32_t payload_cursor;
+    uint32_t published_put;
+    uint32_t header;
+    uint32_t count;
+    uint32_t method;
+    uint32_t subchannel;
+    uint32_t incrementing;
+} Dah2PbPacketHistory;
+
+volatile uint32_t g_dah2_pb_packet_history_cursor;
+volatile Dah2PbPacketHistory g_dah2_pb_packet_history[32768];
+
 /* Read-only diagnostics for phase timing of the most recent presented frame.
  * Values are QPC ticks and can be sampled without enabling textual tracing. */
 volatile uint64_t g_dah2_present_timing_samples;
@@ -61,6 +77,10 @@ volatile uint64_t g_dah2_present_timing_flush;
 volatile uint64_t g_dah2_present_timing_swap;
 volatile uint64_t g_dah2_present_timing_total;
 volatile uint32_t g_dah2_present_phase;
+/* Win32 thread id of whichever thread last presented a frame; the kernel
+ * bridge uses it to charge kernel-call time to the frame budget (see
+ * g_xbox_kernel_frame_* in kernel_bridge.c). */
+volatile LONG g_dah2_present_thread_id;
 
 static uint32_t dah2_pb_address(uint32_t address)
 {
@@ -433,6 +453,21 @@ static void dah2_guest_gpu_commit_locked(uint32_t guest_device,
                 commit_malformed++;
                 break;
             }
+
+            {
+                uint32_t sequence = g_dah2_pb_packet_history_cursor++;
+                volatile Dah2PbPacketHistory *record =
+                    &g_dah2_pb_packet_history[sequence & 32767u];
+                record->commit = (uint32_t)g_bridge.commits;
+                record->packet_cursor = packet_cursor;
+                record->payload_cursor = cursor;
+                record->published_put = put;
+                record->header = header;
+                record->count = count;
+                record->method = method;
+                record->subchannel = subchannel;
+                record->incrementing = incrementing ? 1u : 0u;
+            }
             budget -= count;
 
             for (i = 0; i < count; ++i) {
@@ -499,6 +534,17 @@ void dah2_guest_gpu_commit(uint32_t guest_device, uint32_t published_put)
     ReleaseSRWLockExclusive(&g_bridge.lock);
 }
 
+int dah2_test_window_hidden(void)
+{
+    static volatile LONG s_cached = -1;
+    LONG v = s_cached;
+    if (v < 0) {
+        v = getenv("DAH2_TEST_WINDOW_HIDDEN") != NULL;
+        s_cached = v;
+    }
+    return (int)v;
+}
+
 static void dah2_frame_cap_30hz(void)
 {
     static LARGE_INTEGER s_freq;
@@ -506,6 +552,10 @@ static void dah2_frame_cap_30hz(void)
     static HANDLE s_timer;
     LARGE_INTEGER now;
     LONGLONG period;
+
+    if (getenv("DAH2_UNCAPPED_DIAGNOSTIC") &&
+        getenv("DAH2_TEST_WINDOW_HIDDEN"))
+        return;
 
     if (s_freq.QuadPart == 0) {
         QueryPerformanceFrequency(&s_freq);
@@ -564,11 +614,10 @@ void dah2_guest_gpu_present(uint32_t guest_device)
         DAH2_TRACE_FPRINTF(stderr, "[PRESENT-HEARTBEAT] call #%ld t=%.3fs guest_device=0x%08X\n", n, t, guest_device);
     }
 
-    g_dah2_present_phase = 1;
-    dah2_frame_cap_30hz();
-    QueryPerformanceCounter(&qpc_mark);
-    after_cap = qpc_mark.QuadPart;
-
+    g_dah2_present_thread_id = (LONG)GetCurrentThreadId();
+    /* The 30 Hz limiter now sits between flush and swap (see below) so the
+     * flip itself lands on a fixed deadline; commit cost no longer shows up
+     * as flip-to-flip jitter. */
     g_dah2_present_phase = 2;
     AcquireSRWLockExclusive(&g_bridge.lock);
 
@@ -578,6 +627,7 @@ void dah2_guest_gpu_present(uint32_t guest_device)
         if (_n <= 20 || (_n % 1000) == 0)
             DAH2_TRACE_FPRINTF(stderr, "[DAH2-GPU] present: guest_device span invalid (call #%ld)\n", _n);
         ReleaseSRWLockExclusive(&g_bridge.lock);
+        dah2_frame_cap_30hz();
         return;
     }
 
@@ -599,11 +649,16 @@ void dah2_guest_gpu_present(uint32_t guest_device)
         pgraph_d3d11_flush();
         QueryPerformanceCounter(&qpc_mark);
         after_flush = qpc_mark.QuadPart;
+        g_dah2_present_phase = 1;
+        dah2_frame_cap_30hz();
+        QueryPerformanceCounter(&qpc_mark);
+        after_cap = qpc_mark.QuadPart;
         g_dah2_present_phase = 4;
         d3d8_PresentFrame();
         QueryPerformanceCounter(&qpc_mark);
         after_swap = qpc_mark.QuadPart;
         g_bridge.presents++;
+        dah2_parity_state_present(g_bridge.presents);
 
         if (g_bridge.presents <= 8 || (g_bridge.presents % 300u) == 0) {
             pgraph_d3d11_get_stats(&stats);
@@ -615,17 +670,42 @@ void dah2_guest_gpu_present(uint32_t guest_device)
         }
     }
 
+    if (!g_bridge.renderer_ready) {
+        /* No swap to align to: pace the commit itself. */
+        QueryPerformanceCounter(&qpc_mark);
+        after_flush = qpc_mark.QuadPart;
+        dah2_frame_cap_30hz();
+        QueryPerformanceCounter(&qpc_mark);
+        after_cap = after_swap = qpc_mark.QuadPart;
+    }
     ReleaseSRWLockExclusive(&g_bridge.lock);
     g_dah2_present_phase = 0;
     QueryPerformanceCounter(&qpc_mark);
     finished = qpc_mark.QuadPart;
     g_dah2_present_timing_frequency = (uint64_t)qpc_frequency.QuadPart;
     g_dah2_present_timing_guest = s_last_exit ? (uint64_t)(entry - s_last_exit) : 0;
-    g_dah2_present_timing_cap = (uint64_t)(after_cap - entry);
-    g_dah2_present_timing_commit = (uint64_t)(after_commit - after_cap);
+    g_dah2_present_timing_cap = (uint64_t)(after_cap - after_flush);
+    g_dah2_present_timing_commit = (uint64_t)(after_commit - entry);
     g_dah2_present_timing_flush = (uint64_t)(after_flush - after_commit);
-    g_dah2_present_timing_swap = (uint64_t)(after_swap - after_flush);
+    g_dah2_present_timing_swap = (uint64_t)(after_swap - after_cap);
     g_dah2_present_timing_total = (uint64_t)(finished - entry);
     s_last_exit = finished;
     g_dah2_present_timing_samples++;
+    if (getenv("DAH2_TIMING_TRACE") &&
+        (g_dah2_present_timing_samples <= 8 ||
+         (g_dah2_present_timing_samples % 120u) == 0)) {
+        const double tick_ms = 1000.0 / (double)qpc_frequency.QuadPart;
+        static FILE *timing_log;
+        if (!timing_log) timing_log = fopen("present_timing.log", "ab");
+        if (timing_log) fprintf(timing_log,
+                "[PRESENT-TIMING] sample=%llu guest=%.3fms cap=%.3fms commit=%.3fms flush=%.3fms swap=%.3fms total=%.3fms\n",
+                (unsigned long long)g_dah2_present_timing_samples,
+                (double)g_dah2_present_timing_guest * tick_ms,
+                (double)g_dah2_present_timing_cap * tick_ms,
+                (double)g_dah2_present_timing_commit * tick_ms,
+                (double)g_dah2_present_timing_flush * tick_ms,
+                (double)g_dah2_present_timing_swap * tick_ms,
+                (double)g_dah2_present_timing_total * tick_ms);
+        if (timing_log) fflush(timing_log);
+    }
 }

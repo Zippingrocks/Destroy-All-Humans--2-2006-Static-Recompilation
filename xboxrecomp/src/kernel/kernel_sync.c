@@ -202,6 +202,14 @@ NTSTATUS __stdcall xbox_NtWaitForSingleObject(
 {
     DWORD ms = xbox_nt_timeout_to_ms(Timeout);
     DWORD result = WaitForSingleObjectEx(Handle, ms, Alertable);
+    if (result == WAIT_FAILED) {
+        static LONG failed_log_count;
+        LONG count = InterlockedIncrement(&failed_log_count);
+        if (count <= 16)
+            xbox_log(XBOX_LOG_ERROR, XBOX_LOG_SYNC,
+                "NtWaitForSingleObject: handle=%p thread=%lu failed (error %u, occurrence %ld)",
+                Handle, (unsigned long)GetCurrentThreadId(), GetLastError(), count);
+    }
     return xbox_wait_result_to_ntstatus(result, 1);
 }
 
@@ -222,6 +230,14 @@ NTSTATUS __stdcall xbox_NtWaitForSingleObjectEx(
     (void)WaitMode;
 
     result = WaitForSingleObjectEx(Handle, ms, Alertable);
+    if (result == WAIT_FAILED) {
+        static LONG failed_log_count;
+        LONG count = InterlockedIncrement(&failed_log_count);
+        if (count <= 16)
+            xbox_log(XBOX_LOG_ERROR, XBOX_LOG_SYNC,
+                "NtWaitForSingleObjectEx: handle=%p thread=%lu failed (error %u, occurrence %ld)",
+                Handle, (unsigned long)GetCurrentThreadId(), GetLastError(), count);
+    }
     return xbox_wait_result_to_ntstatus(result, 1);
 }
 
@@ -640,8 +656,12 @@ NTSTATUS __stdcall xbox_NtReleaseMutant(HANDLE MutantHandle, PLONG PreviousCount
      */
     if (!ReleaseMutex(MutantHandle)) {
         DWORD err = GetLastError();
-        xbox_log(XBOX_LOG_ERROR, XBOX_LOG_SYNC,
-            "NtReleaseMutant: ReleaseMutex failed (error %u)", err);
+        static LONG failed_log_count;
+        LONG count = InterlockedIncrement(&failed_log_count);
+        if (count <= 16)
+            xbox_log(XBOX_LOG_ERROR, XBOX_LOG_SYNC,
+                "NtReleaseMutant: handle=%p thread=%lu ReleaseMutex failed (error %u, occurrence %ld)",
+                MutantHandle, (unsigned long)GetCurrentThreadId(), err, count);
         /* Releasing a mutex this thread does not own is the common failure. */
         return (err == ERROR_NOT_OWNER) ? STATUS_MUTANT_NOT_OWNED
                                         : STATUS_INVALID_HANDLE;

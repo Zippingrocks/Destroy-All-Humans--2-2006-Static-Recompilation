@@ -23,6 +23,13 @@ typedef enum NV2AVPStatus {
     NV2A_VP_UNSUPPORTED_FORMAT
 } NV2AVPStatus;
 
+/* Last bounded-interpreter source failure, for private parity diagnostics. */
+extern volatile int nv2a_vp_last_error_slot;
+extern volatile int nv2a_vp_last_error_source;
+extern volatile int nv2a_vp_last_error_constant;
+extern volatile int nv2a_vp_last_error_a0;
+extern volatile int nv2a_vp_last_error_index;
+
 typedef struct NV2AVPSource {
     unsigned mux; /* 1=temp, 2=attribute, 3=constant; 0 is invalid when used. */
     unsigned temporary;
@@ -39,6 +46,17 @@ typedef struct NV2AVPInstruction {
     unsigned relative, final;
 } NV2AVPInstruction;
 
+/* Immutable decoded instructions prepared once for one synchronous draw.
+ * The caller supplies that draw's constants and attributes at execution. The
+ * context owns every decoded instruction; it never references mutable words.
+ */
+typedef struct NV2AVPPreparedProgram {
+    unsigned start, length;
+    NV2AVPStatus status;
+    NV2AVPInstruction instruction[NV2A_VP_SLOTS];
+    uint8_t sources[NV2A_VP_SLOTS];
+} NV2AVPPreparedProgram;
+
 typedef struct NV2AVertexResult {
     /* 0=oPos, 3=oD0, 4=oD1, 5=oFog, 6=oPts, 7/8=oB0/oB1, 9..12=oT0..3. */
     float output[NV2A_VP_OUTPUTS][4];
@@ -50,6 +68,11 @@ NV2AVPStatus nv2a_vp_validate_mov(const uint32_t *program, unsigned slots,
     unsigned start, unsigned *length, unsigned *bad_slot);
 NV2AVPStatus nv2a_vp_execute_mov(const uint32_t *program, unsigned slots,
     unsigned start, const float attributes[NV2A_VP_ATTRIBUTES][4],
+    const float constants[NV2A_VP_CONSTANTS][4], NV2AVertexResult *out);
+NV2AVPStatus nv2a_vp_prepare_mov(const uint32_t *program, unsigned slots,
+    unsigned start, NV2AVPPreparedProgram *out, unsigned *bad_slot);
+NV2AVPStatus nv2a_vp_execute_prepared(const NV2AVPPreparedProgram *prepared,
+    const float attributes[NV2A_VP_ATTRIBUTES][4],
     const float constants[NV2A_VP_CONSTANTS][4], NV2AVertexResult *out);
 /* Decode one attribute at an already bounds-checked guest address. Stride is
  * encoded in format but the caller owns index*stride/address overflow checks.

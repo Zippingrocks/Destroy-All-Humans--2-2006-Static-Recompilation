@@ -18,6 +18,7 @@
 #include "kernel.h"
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #if !defined(_WIN32)
 #include <fcntl.h>
@@ -96,6 +97,25 @@ static BOOL translate_obj_path(PXBOX_OBJECT_ATTRIBUTES ObjectAttributes,
     return xbox_translate_path(xbox_path, win_path, buf_size);
 }
 
+static void dah2_file_open_diagnostic(const char* xbox_path, const WCHAR* host_path)
+{
+    static int enabled = -1;
+    static long sequence;
+    FILE* file;
+    if (enabled < 0) {
+        const char* value = getenv("DAH2_FILE_OPEN_DIAGNOSTIC");
+        enabled = value && value[0] && strcmp(value, "0") != 0;
+    }
+    if (!enabled)
+        return;
+    file = _wfopen(L"dah2_file_open_trace.log", L"a, ccs=UTF-8");
+    if (!file)
+        return;
+    fwprintf(file, L"%ld\tguest=%hs\thost=%ls\n", ++sequence,
+             xbox_path ? xbox_path : "", host_path ? host_path : L"");
+    fclose(file);
+}
+
 NTSTATUS __stdcall xbox_NtCreateFile(
     PHANDLE FileHandle, ACCESS_MASK DesiredAccess,
     PXBOX_OBJECT_ATTRIBUTES ObjectAttributes, PXBOX_IO_STATUS_BLOCK IoStatusBlock,
@@ -114,6 +134,8 @@ NTSTATUS __stdcall xbox_NtCreateFile(
         xbox_log(XBOX_LOG_ERROR, XBOX_LOG_FILE, "NtCreateFile: path translation failed");
         return STATUS_OBJECT_PATH_NOT_FOUND;
     }
+
+    dah2_file_open_diagnostic(get_xbox_path(ObjectAttributes), win_path);
 
     {
         static long s_create_count;

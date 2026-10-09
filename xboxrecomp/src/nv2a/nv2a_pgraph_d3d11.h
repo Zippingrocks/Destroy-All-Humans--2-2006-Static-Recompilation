@@ -61,4 +61,41 @@ typedef struct {
 
 void pgraph_d3d11_get_stats(PgraphD3D11Stats *out);
 
+typedef struct {
+    uint32_t methods, begins, ends;
+    uint32_t begin_modes[11];
+    uint32_t element16_words, element32_words;
+    uint32_t draw_arrays_words, draw_arrays_vertices;
+    uint32_t inline_words, clears;
+} PgraphD3D11FrameMethods;
+
+void pgraph_d3d11_get_last_frame_methods(PgraphD3D11FrameMethods *out);
+
+#define PGRAPH_D3D11_PROFILE_COUNT 10u
+typedef struct {
+    uint32_t accepted[PGRAPH_D3D11_PROFILE_COUNT];
+    uint32_t rejected[PGRAPH_D3D11_PROFILE_COUNT];
+    uint32_t accepted_inline[PGRAPH_D3D11_PROFILE_COUNT];
+    uint32_t clipped[PGRAPH_D3D11_PROFILE_COUNT];
+} PgraphD3D11FrameProfiles;
+
+/* Completed-frame checked submissions; zero when state/timing memory is off.
+ * Accepted means a nonzero-primitives host draw succeeded, not visible pixels.
+ * accepted_inline is a subset for programmable INLINE_ARRAY (source 3). */
+void pgraph_d3d11_get_last_frame_profiles(PgraphD3D11FrameProfiles *out);
+
+typedef struct {
+    uint32_t kind, profile, count, mode;
+    uint32_t target, texture, clip_h, clip_v, combiner;
+} PgraphD3D11RecentDraw;
+
+void pgraph_d3d11_get_recent_draws(PgraphD3D11RecentDraw out[4]);
+
+typedef struct {
+    uint32_t target, texture;
+    uint32_t source_before_nonblack, target_after_nonblack;
+} PgraphD3D11DrawSurfaceProbe;
+
+int pgraph_d3d11_get_draw_surface_probe(PgraphD3D11DrawSurfaceProbe out[4]);
+
 #endif /* NV2A_PGRAPH_D3D11_H */

@@ -1,0 +1,55 @@
+{
+  "schema": "verified-function-extents-v1",
+  "title_id": "0x54510106",
+  "xbe_sha256": "906871912263ae25de9f1c8e642ec0443b651b4beaf28b05057281ddc58baa1c",
+  "functions": [
+    {
+      "start": "0x0012FFB0",
+      "end": "0x001301DA",
+      "num_instructions": 164,
+      "sha256": "25ec9a7c0975f06a11a6465a4ffbe36f18fcea42603c8525dabab80ebe066042",
+      "reason": "Retail eight-slot asset-wrapper pool allocator; false interior seed 130001 truncated its slow allocation path. Preserve that separate symbol, but decode the real parent through RET0 at 1301D9.",
+      "verification": "tools/test_asset_wrapper_pool_recovery.py"
+    },
+    {
+      "start": "0x00179240",
+      "end": "0x001799C2",
+      "num_instructions": 496,
+      "sha256": "da5151aff7ef27acf4b01ad41c985c44e3db9f01d6d6ddcfca1c304aee83903e",
+      "reason": "Retail quad vertex generator continues beyond the detected 179385 boundary through the full loop and RET8 at 1799BF.",
+      "verification": "tools/test_verified_function_extents.py"
+    },
+    {
+      "start": "0x001AB6A0",
+      "end": "0x001AB75A",
+      "num_instructions": 54,
+      "sha256": "2400caaf88b900e55180a744a7e911cfafb4d9da8d10045fa014011a5d8e97fd",
+      "reason": "Retail sound activity update continues beyond the detected 1AB6B3 boundary through both pool activity passes and RET4 at 1AB757; the truncated prefix also leaves ESI/EDI pushes unbalanced.",
+      "verification": "tools/test_audio_pool_update_recovery.py"
+    },
+    {
+      "start": "0x001AE2F0",
+      "end": "0x001AE48E",
+      "num_instructions": 131,
+      "sha256": "d0ee7305d3df3c113e8ba11f52c661aa3673e5f803da062e2cf93d980e8c6099",
+      "reason": "Retail streaming voice constructor continues beyond the false 1AE312 interior boundary through allocation/setup and RET8 at 1AE48B. The truncated prefix leaves 56 bytes of guest stack unbalanced, proven by private run731.",
+      "verification": "tools/test_streaming_voice_constructor_recovery.py"
+    },
+    {
+      "start": "0x0011A340",
+      "end": "0x0011A3B3",
+      "num_instructions": 51,
+      "sha256": "23a78e303dfbf309dc13f5255be7b94045bccf788cb5c58a556fe7fe3908f9f2",
+      "reason": "Retail object-vector cleanup extends across false 11A37B/11A382 boundaries through all four saved-register pops and RET0 at 11A3B2. Its empty-vector branch previously called an unresolved interior stub, leaking 16 bytes and the caller's object registers before the frame-1623 release loop.",
+      "verification": "tools/test_object_vector_cleanup_recovery.py"
+    },
+    {
+      "start": "0x00110790",
+      "end": "0x001108F5",
+      "num_instructions": 117,
+      "sha256": "19ee085f82bbb17472697b3c504369203818b3c8485516b00619294ac99abcbd",
+      "reason": "Retail script-record vector constructor crosses false 110842/110887/1108CE/1108E9 boundaries through both iteration loops and RET8 at 1108F2. Truncated/stub exits leave the caller's saved registers and stack unrestored; run739 observes invalid registry receiver 6 despite a valid global registry.",
+      "verification": "tools/test_script_record_constructor_recovery.py"
+    }
+  ]
+}

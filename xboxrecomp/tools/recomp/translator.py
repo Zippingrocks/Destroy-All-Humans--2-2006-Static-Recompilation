@@ -22,6 +22,7 @@ import struct
 from .config import va_to_file_offset, is_code_address
 from .disasm import Disassembler
 from .lifter import Lifter, lift_basic_block, detect_seh_helpers
+from .function_extents import apply_function_extents
 
 
 def _fixup_icall_esp_save(lines):
@@ -659,6 +660,7 @@ class FunctionTranslator:
         has_conditionals = any(
             insn.is_cond_jump or insn.mnemonic.startswith("set")
             or insn.mnemonic.startswith("cmov")
+            or insn.mnemonic in ("bsf", "bsr")
             for insn in instructions)
         if has_conditionals:
             lines.append(f"    int _flags = 0; /* fallback flag var */")
@@ -890,7 +892,7 @@ class BatchTranslator:
     def __init__(self, xbe_path, func_json_path, labels_json_path=None,
                  identified_json_path=None, abi_json_path=None,
                  output_dir=None, seh_prolog=None, seh_epilog=None,
-                 trace_functions=None):
+                 trace_functions=None, function_extents_path=None):
         self.xbe_path = xbe_path
         self.output_dir = output_dir or os.path.join(
             os.path.dirname(__file__), "output")
@@ -910,6 +912,11 @@ class BatchTranslator:
             if "end" in func:
                 func["end"] = int(func["end"], 16)
             self.func_db[addr] = func
+
+        # Explicit project-only corrections, verified before the Lifter or CFG
+        # ownership can interpret false interior seeds as function boundaries.
+        self.applied_function_extents = apply_function_extents(
+            self.xbe_data, self.func_db, function_extents_path)
 
         # Load labels
         self.label_db = {}

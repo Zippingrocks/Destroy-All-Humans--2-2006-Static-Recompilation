@@ -255,6 +255,14 @@ uint32_t xbox_HeapAlloc(uint32_t size, uint32_t alignment);
 void xbox_HeapFree(uint32_t xbox_va);
 
 /**
+ * Size in bytes of the live heap block that starts exactly at xbox_va, as
+ * recorded by the allocator (may exceed the original request if a larger
+ * free block was reused). Returns 0 if xbox_va is not the start of a live
+ * block.
+ */
+uint32_t xbox_HeapBlockSize(uint32_t xbox_va);
+
+/**
  * Get the file mapping handle for the Xbox memory region.
  * Used by the VEH handler to map additional mirror views on demand.
  * Returns NULL if file mapping is not available.
@@ -269,6 +277,8 @@ HANDLE xbox_GetMappingHandle(void);
 /* Carve a simulated stack for a spawned thread. Returns the Xbox VA of the
  * stack top, or 0 when the pool is exhausted. */
 uint32_t xbox_AllocThreadStack(void);
+/* Release an exact owned slice; invalid or already-freed tops are ignored. */
+void xbox_FreeThreadStack(uint32_t stack_top);
 
 /* Worker stack slices for host-tick-driven titles (see XBOX_WORKER_STACK_* and
  * docs/technical/burnout3-reunification.md). Additive; unused by default-model

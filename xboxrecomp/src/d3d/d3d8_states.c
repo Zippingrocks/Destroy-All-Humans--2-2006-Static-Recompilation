@@ -22,6 +22,9 @@ static ID3D11BlendState        *g_blend_state = NULL;
 static ID3D11DepthStencilState *g_ds_state = NULL;
 static ID3D11RasterizerState   *g_raster_state = NULL;
 static ID3D11SamplerState      *g_sampler_states[4] = { NULL, NULL, NULL, NULL };
+static D3D11_SAMPLER_DESC       g_sampler_descs[4];
+static BOOL                    g_sampler_desc_valid[4];
+static ID3D11Device            *g_sampler_devices[4];
 
 /* Last known render state hash for dirty detection */
 static DWORD g_last_blend_hash = 0;
@@ -264,22 +267,47 @@ static D3D11_FILTER d3d8_to_d3d11_filter(DWORD mag, DWORD min, DWORD mip)
     return D3D11_FILTER_MIN_MAG_MIP_POINT;
 }
 
+static void d3d8_states_bind_sampler(DWORD stage,ID3D11Device *device,
+                                      ID3D11DeviceContext *ctx,
+                                      const D3D11_SAMPLER_DESC *desc)
+{
+    if(stage>=4) return;
+    /* The normalized descriptor was zero-initialized. Compare every bit,
+     * including floating-point payloads, and never reuse another device's state.
+     * Keep the actual binding on hits: other draws may have changed PS slots. */
+    if(g_sampler_desc_valid[stage] && g_sampler_states[stage] &&
+       g_sampler_devices[stage]==device &&
+       !memcmp(&g_sampler_descs[stage],desc,sizeof(*desc))) {
+        ID3D11DeviceContext_PSSetSamplers(ctx,stage,1,&g_sampler_states[stage]);
+        return;
+    }
+    g_sampler_desc_valid[stage]=FALSE;
+    g_sampler_devices[stage]=NULL;
+    memset(&g_sampler_descs[stage],0,sizeof(g_sampler_descs[stage]));
+    if(g_sampler_states[stage]) {
+        ID3D11SamplerState_Release(g_sampler_states[stage]);
+        g_sampler_states[stage]=NULL;
+    }
+    HRESULT hr=ID3D11Device_CreateSamplerState(device,desc,&g_sampler_states[stage]);
+    if(SUCCEEDED(hr)) {
+        if(g_sampler_states[stage]) {
+            g_sampler_descs[stage]=*desc;
+            g_sampler_devices[stage]=device;
+            g_sampler_desc_valid[stage]=TRUE;
+        }
+        ID3D11DeviceContext_PSSetSamplers(ctx,stage,1,&g_sampler_states[stage]);
+    }
+}
+
 void d3d8_states_apply_sampler(DWORD stage)
 {
     const DWORD *tss;
     D3D11_SAMPLER_DESC sd;
-    HRESULT hr;
     ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
 
     if (stage >= 4) return;
     tss = d3d8_GetTSS(stage);
     if (!tss) return;
-
-    /* Release old sampler */
-    if (g_sampler_states[stage]) {
-        ID3D11SamplerState_Release(g_sampler_states[stage]);
-        g_sampler_states[stage] = NULL;
-    }
 
     memset(&sd, 0, sizeof(sd));
     sd.Filter = d3d8_to_d3d11_filter(
@@ -293,10 +321,7 @@ void d3d8_states_apply_sampler(DWORD stage)
     sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
     sd.MaxLOD = D3D11_FLOAT32_MAX;
 
-    hr = ID3D11Device_CreateSamplerState(d3d8_GetD3D11Device(), &sd, &g_sampler_states[stage]);
-    if (SUCCEEDED(hr)) {
-        ID3D11DeviceContext_PSSetSamplers(ctx, stage, 1, &g_sampler_states[stage]);
-    }
+    d3d8_states_bind_sampler(stage,d3d8_GetD3D11Device(),ctx,&sd);
 }
 
 /* ================================================================
@@ -320,6 +345,9 @@ void d3d8_states_shutdown(void)
             ID3D11SamplerState_Release(g_sampler_states[i]);
             g_sampler_states[i] = NULL;
         }
+        g_sampler_desc_valid[i]=FALSE;
+        g_sampler_devices[i]=NULL;
+        memset(&g_sampler_descs[i],0,sizeof(g_sampler_descs[i]));
     }
     g_last_blend_hash = 0;
     g_last_ds_hash = 0;

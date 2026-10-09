@@ -55,6 +55,8 @@ int main(void) {
     unsigned length,bad;
     NV2AVPInstruction d;
     CHECK(nv2a_vp_validate_mov(retail,4,0,&length,&bad)==NV2A_VP_OK && length==4);
+    { const uint32_t dph[4]={0x00000000u,0x00C4801Bu,0xB4369800u,0x28900001u};
+      CHECK(nv2a_vp_validate_mov(dph,1,0,&length,&bad)==NV2A_VP_OK && length==1); }
     const unsigned attrs[]={0,1,2,0},outputs[]={0,9,3,5};
     for(unsigned n=0;n<4;n++) {
         nv2a_vp_decode_instruction(retail+n*4,&d);
@@ -106,6 +108,16 @@ int main(void) {
         CHECK(nv2a_vp_execute_mov(p,1,0,a,c,&r)==NV2A_VP_OK);
         CHECK(!memcmp(r.output[9],c[index],16));++cases;
     }
+    /* Relative reads beyond c191 are defined as zero, not a shader fault. */
+    {
+        uint32_t q[8];float a[16][4]={{128,0,0,0}},c[192][4]={{0}};NV2AVertexResult r;
+        enc(q,2,0,0x1B,0,0,0,0,0,0);
+        q[1]=(q[1]&~(15u<<21))|(13u<<21); /* ARL A0.x, v0.x */
+        enc(q+4,3,86,0x1B,0,0,0,9,15,1);q[7]|=2;
+        CHECK(nv2a_vp_execute_mov(q,2,0,a,c,&r)==NV2A_VP_OK);
+        CHECK(r.output[9][0]==0 && r.output[9][1]==0 && r.output[9][2]==0 && r.output[9][3]==0);
+        ++cases;
+    }
     uint32_t p[24];memset(p,0xFF,sizeof(p));memcpy(p+4,retail,sizeof(retail));
     CHECK(nv2a_vp_validate_mov(p,6,1,&length,&bad)==NV2A_VP_OK && length==4);
     CHECK(nv2a_vp_validate_mov(p,137,1,&length,&bad)==NV2A_VP_INVALID_ARGUMENT);
@@ -114,9 +126,9 @@ int main(void) {
         memcpy(p,retail,sizeof(retail));NV2AVPStatus want=NV2A_VP_UNSUPPORTED_OPCODE;
         switch(mutation) {
         case 0:p[0]=1;break;
-        case 1:p[1]=(p[1]&~(15<<21))|(2<<21);break;
-        case 2:p[1]|=1<<25;break;
-        case 3:p[3]|=2;break;
+        case 1:p[1]=(p[1]&~(15<<21))|(14<<21);break;
+        case 2:p[1]=(p[1]&~(15<<21))|(8<<21);break;
+        case 3:p[3]=(p[3]&~(255<<3))|(13<<3);want=NV2A_VP_INVALID_DESTINATION;break;
         case 4:p[2]&=~(3<<26);want=NV2A_VP_INVALID_SOURCE;break;
         case 5:enc(p,1,13,0x1B,0,0,0,0,15,0);want=NV2A_VP_INVALID_SOURCE;break;
         case 6:enc(p,3,192,0x1B,0,0,0,0,15,0);want=NV2A_VP_INVALID_SOURCE;break;
@@ -128,15 +140,18 @@ int main(void) {
         }
         unchanged_error(p,want);
     }
+    { const unsigned char s1[8]={0x00,0x80,0xFF,0xFF,0x00,0x00,0xFF,0x7F};float value[4];
+      CHECK(nv2a_vp_decode_attribute(0x41,s1,sizeof(s1),value)==NV2A_VP_OK);
+      CHECK(value[0]==-1.0f && value[1]==-1.0f/32767.0f && value[2]==0.0f && value[3]==1.0f); }
     for(unsigned type=0;type<16;type++)for(unsigned count=0;count<16;count++)for(unsigned bytes=0;bytes<=16;bytes++) {
         unsigned char data[16]={0};float value[4]={7,8,9,10},before[4];memcpy(before,value,16);
-        unsigned valid=count>=1 && count<=4 && (type==2 || (type==0 && count==4));
-        NV2AVPStatus want=!valid ? NV2A_VP_UNSUPPORTED_FORMAT : bytes<(type==2 ? count*4 : 4) ? NV2A_VP_INVALID_ARGUMENT : NV2A_VP_OK;
+        unsigned valid=count>=1 && count<=4 && (type==2 || type==1 || (type==0 && count==4));
+        NV2AVPStatus want=!valid ? NV2A_VP_UNSUPPORTED_FORMAT : bytes<(type==2 ? count*4 : type==1 ? count*2 : 4) ? NV2A_VP_INVALID_ARGUMENT : NV2A_VP_OK;
         CHECK(nv2a_vp_decode_attribute((count<<4)|type,data,bytes,value)==want);
         if(want!=NV2A_VP_OK)CHECK(!memcmp(before,value,16));
         ++cases;
     }
-    printf("PASS: %u native MOV/attribute/mask/bounds/fail-closed cases\n",cases);
+    printf("PASS: %u native NV2A program/attribute/mask/bounds/fail-closed cases\n",cases);
     return 0;
 }
 '''.replace("FIXTURE", ",".join(f"0x{v:08X}u" for v in fixture))

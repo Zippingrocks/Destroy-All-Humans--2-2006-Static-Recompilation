@@ -161,6 +161,9 @@ def main():
                              "(default: tools/abi_analysis/output)")
     parser.add_argument("--functions",
                         help="Path to functions.json (overrides --disasm-dir)")
+    parser.add_argument("--function-extents", metavar="FILE",
+                        help="Opt-in project manifest of exclusive function ends, "
+                             "verified against XBE/range SHA256 and retail instruction boundaries")
     parser.add_argument("--labels",
                         help="Path to labels.json (overrides --disasm-dir)")
     parser.add_argument("--identified",
@@ -240,6 +243,7 @@ def main():
         abi_json_path=data_files.get("abi"),
         output_dir=args.output_dir,
         trace_functions=_load_addrs(args.trace_functions),
+        function_extents_path=args.function_extents,
         seh_prolog=int(args.seh_prolog, 16) if args.seh_prolog else None,
         seh_epilog=int(args.seh_epilog, 16) if args.seh_epilog else None,
     )

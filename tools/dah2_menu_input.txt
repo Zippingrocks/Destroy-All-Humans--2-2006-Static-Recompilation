@@ -1,0 +1,4 @@
+# Hidden-only Start pulses matched to the three retail startup gates.
+300 1 0010 0 0 0 0 0 0
+900 1 0010 0 0 0 0 0 0
+3600 1 0010 0 0 0 0 0 0

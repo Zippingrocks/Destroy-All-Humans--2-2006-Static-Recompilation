@@ -4,6 +4,7 @@ import re
 
 ROOT = Path(__file__).resolve().parents[1]
 source = (ROOT / "src/recomp_manual.c").read_text(encoding="utf-8")
+launcher = (ROOT / "tools/start_parity_session.ps1").read_text(encoding="utf-8")
 block = re.search(r"/\* DAH2_INPUT_REPLAY_BEGIN.*?/\* DAH2_INPUT_REPLAY_END \*/", source, re.S)
 assert block, "logical input adapter block missing"
 code = block.group()
@@ -29,6 +30,9 @@ assert "esp += 12u;    /* ret 8 */" in code
 assert "memcpy(manual_mem8(output), state, sizeof(state))" in code
 assert "XInputGetState(" not in code and "GetAsyncKeyState(" not in code
 assert "SwitchDesktop" not in code and "SetThreadDesktop" not in code
+assert "[IO.Path]::GetFullPath([string]$Environment['DAH2_INPUT_SCRIPT'], $project)" in launcher
+assert "Assert-PlainPath $inputScript $false" in launcher
+assert "$Environment['DAH2_INPUT_SCRIPT'] = $inputScript" in launcher
 
 for address, symbol in (
     ("0x002961C2", "sub_002961C2"),

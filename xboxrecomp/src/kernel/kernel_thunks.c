@@ -414,7 +414,15 @@ void xbox_kernel_init(void)
     /* Fill thunk table */
     for (ULONG i = 0; i < XBOX_KERNEL_THUNK_TABLE_SIZE; i++) {
         ULONG ordinal = g_thunk_ordinals[i];
-        ULONG_PTR ptr = xbox_resolve_ordinal(ordinal);
+        ULONG_PTR ptr;
+
+        if (ordinal == 0) {
+            /* Zero padding: the list above has 147 real entries in an array
+             * sized for all 378 kernel export slots. Not an import. */
+            xbox_kernel_thunk_table[i] = (ULONG_PTR)xbox_unresolved_thunk;
+            continue;
+        }
+        ptr = xbox_resolve_ordinal(ordinal);
 
         if (ptr) {
             xbox_kernel_thunk_table[i] = ptr;
@@ -426,14 +434,17 @@ void xbox_kernel_init(void)
         }
     }
 
+    /* This table is the host-pointer thunk list from Burnout 3's ordinal order
+     * (see g_thunk_ordinals), NOT the title's own import table. A recompiled
+     * title routes through xbox_kernel_bridge_init(), which reads the title's
+     * real thunk table from its XBE and reports "N/N resolved (B bridged, S
+     * stub)" for that. Do not read this line as the title's coverage. */
     xbox_log(XBOX_LOG_INFO, XBOX_LOG_THUNK,
-        "Thunk table: %u/%u resolved, %u unresolved",
-        resolved, XBOX_KERNEL_THUNK_TABLE_SIZE, unresolved);
-
-    if (unresolved > 0) {
-        xbox_log(XBOX_LOG_WARN, XBOX_LOG_THUNK,
-            "WARNING: %u kernel imports are unresolved - game may crash!", unresolved);
-    }
+        "Legacy host thunk list (Burnout 3 ordinals, not this title's imports): "
+        "%u/%u resolved, %u unresolved of %u real entries "
+        "(array padded to %u slots)",
+        resolved, resolved + unresolved, unresolved, resolved + unresolved,
+        (unsigned)XBOX_KERNEL_THUNK_TABLE_SIZE);
 
     xbox_log(XBOX_LOG_INFO, XBOX_LOG_THUNK,
         "=== Xbox Kernel Replacement Layer ready ===");

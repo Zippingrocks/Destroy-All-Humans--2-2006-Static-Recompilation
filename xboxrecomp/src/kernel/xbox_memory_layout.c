@@ -59,6 +59,11 @@ static void *g_mirror_views[XBOX_NUM_MIRRORS] = {0};
  * XBOX_CONTIG_BASE / XBOX_CONTIG_SIZE come from kernel.h - the bridges need
  * the same numbers for MmClaimGpuInstanceMemory. */
 static void *g_contig_memory = NULL;
+static HANDLE g_contig_mapping_handle = NULL;
+#define XBOX_CONTIG_APERTURE_SIZE 0x40000000u
+#define XBOX_CONTIG_WRAP_VIEW_COUNT \
+    ((XBOX_CONTIG_APERTURE_SIZE / XBOX_CONTIG_SIZE) - 1u)
+static void *g_contig_wrap_views[XBOX_CONTIG_WRAP_VIEW_COUNT] = {0};
 
 /* NV2A GPU register aperture (see MemoryLayoutInit). Backed as plain RAM so
  * that D3D8 code linked into the title can poke it without faulting. */
@@ -179,6 +184,27 @@ static const uint32_t MCPX_COUNTERS[] = {
     0x020010,   /* APU GP sample counter, DirectSound SetupVoiceProcessor */
 };
 
+/*
+ * Words a healthy MCPX DSP holds at a fixed value.
+ *
+ * The retail DirectSound library (DAH2: the routine at 0x266AFx calling
+ * 0x266841) reads the word at 0xFE85A018 -- through a pointer it keeps at
+ * [0x2802A0] -- and treats anything other than 0x00CCCCCC as "the DSP has
+ * stopped": it rewrites the APU front-end registers and then waits 10 ms for
+ * the hardware to settle (KeStallExecutionProcessor(10000)). With no DSP
+ * behind this aperture the word read 0, so the library "recovered" the APU on
+ * EVERY frame, spending 10 ms of each 33.3 ms budget busy-waiting.
+ *
+ * 0x00CCCCCC is what xemu's emulated DSP presents at that address (read live
+ * over its GDB stub, steady across samples, beside a ticking DSP frame
+ * counter). The title only reads this word; nothing needs it to change.
+ * The thread re-asserts it so it also survives guest code that clears DSP
+ * memory during setup.
+ */
+static const struct { uint32_t offset; uint32_t value; } MCPX_DSP_WORDS[] = {
+    { 0x05A018u, 0x00CCCCCCu },   /* 0xFE85A018, EP DSP idle marker */
+};
+
 static void *g_mcpx_regs = NULL;
 
 static DWORD WINAPI nv2a_ack_thread(LPVOID param)
@@ -209,6 +235,13 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
             }
         }
         if (g_mcpx_regs) {
+            for (size_t i = 0; i < sizeof(MCPX_DSP_WORDS) / sizeof(MCPX_DSP_WORDS[0]); i++) {
+                volatile uint32_t *w =
+                    (volatile uint32_t *)((char *)g_mcpx_regs + MCPX_DSP_WORDS[i].offset);
+                if (*w != MCPX_DSP_WORDS[i].value) {
+                    *w = MCPX_DSP_WORDS[i].value;
+                }
+            }
             for (size_t i = 0; i < sizeof(MCPX_COUNTERS) / sizeof(MCPX_COUNTERS[0]); i++) {
                 volatile uint32_t *c =
                     (volatile uint32_t *)((char *)g_mcpx_regs + MCPX_COUNTERS[i]);
@@ -627,22 +660,52 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
      * aliases physical RAM, but we load the XBE image into the low addresses of
      * that same region, so aliasing would put a title's pinned pools on top of
      * its own code. Separate storage costs an extra mapping and behaves
-     * correctly; nothing here depends on the aliasing.
+     * correctly. The physical aperture repeats after its full span; Bink's
+     * motion-compensation reads can cross that boundary by several megabytes.
      *
      * Reserved before the kernel page below, which lives inside it.
      */
     {
         uintptr_t contig_native = XBOX_CONTIG_BASE + g_memory_offset;
-        g_contig_memory = VirtualAlloc(
-            (LPVOID)contig_native,
-            XBOX_CONTIG_SIZE,
-            MEM_RESERVE | MEM_COMMIT,
-            PAGE_READWRITE
-        );
+        unsigned contig_wraps_ok = 0;
+        g_contig_mapping_handle = CreateFileMappingA(
+            INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE, 0,
+            XBOX_CONTIG_SIZE, NULL);
+        if (g_contig_mapping_handle) {
+            g_contig_memory = MapViewOfFileEx(
+                g_contig_mapping_handle, FILE_MAP_ALL_ACCESS, 0, 0,
+                XBOX_CONTIG_SIZE, (LPVOID)contig_native);
+            if (g_contig_memory) {
+                for (unsigned view = 0; view < XBOX_CONTIG_WRAP_VIEW_COUNT; view++) {
+                    uintptr_t wrap_native = contig_native +
+                        (uintptr_t)(view + 1u) * XBOX_CONTIG_SIZE;
+                    g_contig_wrap_views[view] = MapViewOfFileEx(
+                        g_contig_mapping_handle, FILE_MAP_ALL_ACCESS, 0, 0,
+                        XBOX_CONTIG_SIZE, (LPVOID)wrap_native);
+                    if (g_contig_wrap_views[view]) {
+                        contig_wraps_ok++;
+                    } else {
+                        fprintf(stderr,
+                                "  WARNING: contiguous mirror %u at Xbox VA 0x%08X failed (error %lu)\n",
+                                view + 1u,
+                                XBOX_CONTIG_BASE + (view + 1u) * XBOX_CONTIG_SIZE,
+                                GetLastError());
+                    }
+                }
+            }
+        }
         if (g_contig_memory) {
             fprintf(stderr, "  Contiguous window: %u MB at Xbox VA 0x%08X\n",
                     XBOX_CONTIG_SIZE / (1024 * 1024), XBOX_CONTIG_BASE);
+            fprintf(stderr,
+                    "  Contiguous mirrors: %u/%u views mapped through Xbox VA 0x%08X\n",
+                    contig_wraps_ok, (unsigned)XBOX_CONTIG_WRAP_VIEW_COUNT,
+                    XBOX_CONTIG_BASE + XBOX_CONTIG_APERTURE_SIZE);
         } else {
+            if (g_contig_mapping_handle) {
+                CloseHandle(g_contig_mapping_handle);
+                g_contig_mapping_handle = NULL;
+            }
             fprintf(stderr, "  WARNING: contiguous window at 0x%08X failed "
                     "(error %lu); pinned physical allocations will fault\n",
                     XBOX_CONTIG_BASE, GetLastError());
@@ -718,6 +781,11 @@ BOOL xbox_MemoryLayoutInit(const void *xbe_data, size_t xbe_size)
         );
         g_mcpx_regs = g_mcpx_memory;
         if (g_mcpx_memory) {
+            /* Valid before the ack thread's first pass, not just after it. */
+            for (size_t i = 0; i < sizeof(MCPX_DSP_WORDS) / sizeof(MCPX_DSP_WORDS[0]); i++) {
+                *(volatile uint32_t *)((char *)g_mcpx_memory + MCPX_DSP_WORDS[i].offset) =
+                    MCPX_DSP_WORDS[i].value;
+            }
             fprintf(stderr, "  MCPX device aperture: %u MB at Xbox VA "
                     "0x%08X (APU/AC97/USB/NIC, zeroed)\n",
                     XBOX_MCPX_SIZE / (1024 * 1024), XBOX_MCPX_BASE);
@@ -847,7 +915,8 @@ void xbox_ProtectMirrorsForDebug(void)
 void xbox_MemoryLayoutShutdown(void)
 {
     if (g_kernel_memory) {
-        VirtualFree(g_kernel_memory, 0, MEM_RELEASE);
+        if (!g_contig_memory)
+            VirtualFree(g_kernel_memory, 0, MEM_RELEASE);
         g_kernel_memory = NULL;
     }
     if (g_nv2a_ack_thread) {
@@ -859,6 +928,20 @@ void xbox_MemoryLayoutShutdown(void)
     if (g_nv2a_memory) {
         VirtualFree(g_nv2a_memory, 0, MEM_RELEASE);
         g_nv2a_memory = NULL;
+    }
+    for (unsigned view = 0; view < XBOX_CONTIG_WRAP_VIEW_COUNT; view++) {
+        if (g_contig_wrap_views[view]) {
+            UnmapViewOfFile(g_contig_wrap_views[view]);
+            g_contig_wrap_views[view] = NULL;
+        }
+    }
+    if (g_contig_memory) {
+        UnmapViewOfFile(g_contig_memory);
+        g_contig_memory = NULL;
+    }
+    if (g_contig_mapping_handle) {
+        CloseHandle(g_contig_mapping_handle);
+        g_contig_mapping_handle = NULL;
     }
     /* Unmap mirror views first */
     for (int m = 0; m < XBOX_NUM_MIRRORS; m++) {
@@ -929,20 +1012,33 @@ static int g_heap_block_count = 0;
 #define XBOX_MAX_THREAD_STACKS  8
 
 static int g_thread_stacks_used = 0;
+static volatile LONG g_thread_stack_slots[XBOX_MAX_THREAD_STACKS];
 
 uint32_t xbox_AllocThreadStack(void)
 {
-    uint32_t base;
-    int stack_index = (int)InterlockedIncrement((volatile LONG *)&g_thread_stacks_used) - 1;
-
-    if (stack_index >= XBOX_MAX_THREAD_STACKS) {
-        return 0;
+    for (int stack_index = 0; stack_index < XBOX_MAX_THREAD_STACKS; ++stack_index) {
+        if (InterlockedCompareExchange(&g_thread_stack_slots[stack_index], 1, 0) == 0) {
+            uint32_t base = XBOX_STACK_BASE +
+                (uint32_t)stack_index * XBOX_THREAD_STACK_SIZE;
+            InterlockedIncrement((volatile LONG *)&g_thread_stacks_used);
+            /* Top of the owned slice, 16-byte aligned, growing down. */
+            return base + XBOX_THREAD_STACK_SIZE - 16;
+        }
     }
-    base = XBOX_STACK_BASE +
-           (uint32_t)stack_index * XBOX_THREAD_STACK_SIZE;
+    return 0;
+}
 
-    /* Top of the slice, 16-byte aligned, growing down. */
-    return base + XBOX_THREAD_STACK_SIZE - 16;
+void xbox_FreeThreadStack(uint32_t stack_top)
+{
+    uint32_t first_top = XBOX_STACK_BASE + XBOX_THREAD_STACK_SIZE - 16;
+    uint32_t offset, stack_index;
+    if (stack_top < first_top) return;
+    offset = stack_top - first_top;
+    if (offset % XBOX_THREAD_STACK_SIZE) return;
+    stack_index = offset / XBOX_THREAD_STACK_SIZE;
+    if (stack_index >= XBOX_MAX_THREAD_STACKS) return;
+    if (InterlockedCompareExchange(&g_thread_stack_slots[stack_index], 0, 1) == 1)
+        InterlockedDecrement((volatile LONG *)&g_thread_stacks_used);
 }
 
 uint32_t xbox_HeapAlloc(uint32_t size, uint32_t alignment)
@@ -1039,6 +1135,19 @@ uint32_t xbox_HeapAlloc(uint32_t size, uint32_t alignment)
     }
 
     return result;
+}
+
+uint32_t xbox_HeapBlockSize(uint32_t xbox_va)
+{
+    if (!xbox_va) {
+        return 0;
+    }
+    for (int i = 0; i < g_heap_block_count; i++) {
+        if (g_heap_blocks[i].addr == xbox_va && !g_heap_blocks[i].free) {
+            return g_heap_blocks[i].size;
+        }
+    }
+    return 0;
 }
 
 void xbox_HeapFree(uint32_t xbox_va)

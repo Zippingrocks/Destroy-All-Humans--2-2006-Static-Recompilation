@@ -103,4 +103,90 @@ static void dah2_render_trace_end(Dah2RenderBufferTrace trace, int producer) {
     }
     fputs("}\n",stderr); _unlock_file(stderr);
 }
+
+/* Trace the title renderer's bulk vertex-constant records before D3D8 copies
+ * them into the push buffer. This is observational and intentionally bounded:
+ * title skinning palettes start at c86 and are the only large uploads needed
+ * for the parity investigation. */
+static void dah2_constant_source_trace(uint32_t record, uint32_t target,
+                                       uint32_t source, uint32_t count) {
+    static LONG ordinal;
+    if (!dah2_render_trace_enabled() || target < 80 || target > 192 || count < 16)
+        return;
+    LONG current = InterlockedIncrement(&ordinal);
+    if (current > 64) return;
+    _lock_file(stderr);
+    fprintf(stderr,
+        "[CONSTANT-SOURCE] {\"ordinal\":%ld,\"record\":\"%08X\","
+        "\"target\":%u,\"source\":\"%08X\",\"count\":%u,"
+        "\"record_words\":", current, record, target, source, count);
+    dah2_render_trace_words(record, 4);
+    fputs(",\"source_prefix\":", stderr);
+    dah2_render_trace_words(source >= 32 ? source - 32 : source, 8);
+    fputs(",\"source_words\":", stderr);
+    dah2_render_trace_words(source, count < 32 ? count : 32);
+    fputs("}\n", stderr);
+    _unlock_file(stderr);
+}
+
+static void dah2_matrix_multiply_trace(uint32_t destination, uint32_t left,
+                                       uint32_t right) {
+    enum { PROBE_CAPACITY = 512, PROBE_WORDS = 52 };
+    extern volatile LONG g_dah2_matrix_probe_sequence;
+    extern volatile uint32_t g_dah2_matrix_probe_ring[PROBE_CAPACITY][PROBE_WORDS];
+    static LONG ordinal;
+    if (!dah2_render_trace_enabled()) return;
+    LONG sequence = InterlockedIncrement(&g_dah2_matrix_probe_sequence);
+    volatile uint32_t *sample = g_dah2_matrix_probe_ring[(sequence - 1) & (PROBE_CAPACITY - 1)];
+    sample[0] = (uint32_t)sequence;
+    sample[1] = destination; sample[2] = left; sample[3] = right;
+    for (unsigned i = 0; i < 16; ++i) {
+        sample[4 + i] = dah2_render_trace_word(left + i * 4);
+        sample[20 + i] = dah2_render_trace_word(right + i * 4);
+        sample[36 + i] = dah2_render_trace_word(destination + i * 4);
+    }
+    LONG current = InterlockedIncrement(&ordinal);
+    if (current > 32) return;
+    _lock_file(stderr);
+    fprintf(stderr,
+        "[MATRIX-MULTIPLY] {\"ordinal\":%ld,\"destination\":\"%08X\","
+        "\"left\":\"%08X\",\"right\":\"%08X\",\"left_words\":",
+        current, destination, left, right);
+    dah2_render_trace_words(left, 16);
+    fputs(",\"right_words\":", stderr);
+    dah2_render_trace_words(right, 16);
+    fputs(",\"destination_before\":", stderr);
+    dah2_render_trace_words(destination, 16);
+    fputs("}\n", stderr);
+    _unlock_file(stderr);
+}
+
+static void dah2_skeleton_guard_trace(uint32_t stage, uint32_t owner,
+                                      uint32_t parent, uint32_t bone,
+                                      uint32_t local, int32_t index) {
+    enum { PROBE_CAPACITY = 512, PROBE_WORDS = 55 };
+    extern volatile LONG g_dah2_skeleton_probe_sequence;
+    extern volatile uint32_t g_dah2_skeleton_probe_ring[PROBE_CAPACITY][PROBE_WORDS];
+    static LONG ordinal;
+    if (!dah2_render_trace_enabled()) return;
+    LONG sequence = InterlockedIncrement(&g_dah2_skeleton_probe_sequence);
+    volatile uint32_t *sample = g_dah2_skeleton_probe_ring[(sequence - 1) & (PROBE_CAPACITY - 1)];
+    sample[0] = (uint32_t)sequence; sample[1] = stage; sample[2] = owner;
+    sample[3] = parent; sample[4] = bone; sample[5] = local; sample[6] = (uint32_t)index;
+    for (unsigned i = 0; i < 32; ++i) sample[7 + i] = dah2_render_trace_word(owner + i * 4);
+    for (unsigned i = 0; i < 16; ++i) sample[39 + i] = dah2_render_trace_word(local + i * 4);
+    LONG current = InterlockedIncrement(&ordinal);
+    if (current > 96) return;
+    _lock_file(stderr);
+    fprintf(stderr,
+        "[SKELETON-GUARD] {\"ordinal\":%ld,\"stage\":%u,\"owner\":\"%08X\","
+        "\"parent\":\"%08X\",\"bone\":\"%08X\",\"local\":\"%08X\","
+        "\"index\":%d,\"owner_words\":",
+        current, stage, owner, parent, bone, local, index);
+    dah2_render_trace_words(owner, 32);
+    fputs(",\"local_words\":", stderr);
+    dah2_render_trace_words(local, 16);
+    fputs("}\n", stderr);
+    _unlock_file(stderr);
+}
 #endif

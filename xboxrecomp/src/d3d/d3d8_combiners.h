@@ -74,8 +74,8 @@ typedef enum NV2ACombinerRegister {
     NV2A_REG_R0         = 12,  /* Temporary register 0 (also SPARE0) */
     NV2A_REG_R1         = 13,  /* Temporary register 1 (also SPARE1) */
     /* Final combiner only: */
-    NV2A_REG_EF_PROD    = 14,  /* E*F product (final combiner) */
-    NV2A_REG_V1R0_SUM   = 15,  /* V1+R0 sum (final combiner) */
+    NV2A_REG_V1R0_SUM   = 14,  /* V1+R0 sum (final combiner) */
+    NV2A_REG_EF_PROD    = 15,  /* E*F product (final combiner) */
     NV2A_REG_COUNT       = 16,
 } NV2ACombinerRegister;
 
@@ -162,8 +162,8 @@ typedef struct NV2ACombinerInput {
  * Output configuration for one channel (RGB or alpha) of a stage.
  *
  * Packed in hardware output word:
- *   [3:0]  ab_dst       - destination register for AB product
- *   [7:4]  cd_dst       - destination register for CD product
+ *   [3:0]  cd_dst       - destination register for CD product
+ *   [7:4]  ab_dst       - destination register for AB product
  *   [11:8] sum_dst      - destination register for AB+CD sum
  *   [12]   cd_dot       - 1: CD uses dot product instead of multiply
  *   [13]   ab_dot       - 1: AB uses dot product instead of multiply

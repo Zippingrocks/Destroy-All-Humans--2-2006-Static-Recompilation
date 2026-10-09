@@ -1,0 +1,5 @@
+# Hidden logical-pad fixture: skip startup, press Start after the observed title scene, then remain neutral.
+# Poll ordinals are not present numbers; verify delivery counters and the actual frontend transition.
+300 1 0010 0 0 0 0 0 0
+600 1 0010 0 0 0 0 0 0
+1600 1 0010 0 0 0 0 0 0

@@ -99,13 +99,26 @@ static uint32_t fnv1a_hash(const void *data, size_t len)
 
 static uint32_t combiner_state_hash(const NV2ACombinerState *state)
 {
-    return fnv1a_hash(state, sizeof(NV2ACombinerState));
+    NV2ACombinerState key = *state;
+    memset(key.c0, 0, sizeof(key.c0));
+    memset(key.c1, 0, sizeof(key.c1));
+    key.final_c0 = 0;
+    key.final_c1 = 0;
+    return fnv1a_hash(&key, sizeof(key));
 }
 
 static BOOL combiner_state_equal(const NV2ACombinerState *a,
                                  const NV2ACombinerState *b)
 {
-    return memcmp(a, b, sizeof(NV2ACombinerState)) == 0;
+    NV2ACombinerState key_a = *a;
+    NV2ACombinerState key_b = *b;
+    memset(key_a.c0, 0, sizeof(key_a.c0));
+    memset(key_a.c1, 0, sizeof(key_a.c1));
+    memset(key_b.c0, 0, sizeof(key_b.c0));
+    memset(key_b.c1, 0, sizeof(key_b.c1));
+    key_a.final_c0 = key_a.final_c1 = 0;
+    key_b.final_c0 = key_b.final_c1 = 0;
+    return memcmp(&key_a, &key_b, sizeof(key_a)) == 0;
 }
 
 /* ================================================================
@@ -141,22 +154,22 @@ static void parse_combiner_input(DWORD packed, NV2ACombinerInput *input)
 
 /**
  * Parse a 32-bit input register DWORD containing 4 packed inputs.
- * Layout: [31:24]=D [23:16]=C [15:8]=B [7:0]=A
+ * NV2A shader notation order: [31:24]=A [23:16]=B [15:8]=C [7:0]=D
  */
 static void parse_four_inputs(DWORD dword, NV2ACombinerInput inputs[4])
 {
-    parse_combiner_input((dword >>  0) & 0xFF, &inputs[0]); /* A */
-    parse_combiner_input((dword >>  8) & 0xFF, &inputs[1]); /* B */
-    parse_combiner_input((dword >> 16) & 0xFF, &inputs[2]); /* C */
-    parse_combiner_input((dword >> 24) & 0xFF, &inputs[3]); /* D */
+    parse_combiner_input((dword >> 24) & 0xFF, &inputs[0]); /* A */
+    parse_combiner_input((dword >> 16) & 0xFF, &inputs[1]); /* B */
+    parse_combiner_input((dword >>  8) & 0xFF, &inputs[2]); /* C */
+    parse_combiner_input((dword >>  0) & 0xFF, &inputs[3]); /* D */
 }
 
 /**
  * Parse a 32-bit output configuration DWORD for one channel.
  *
  * Output DWORD layout:
- *   [3:0]   AB destination register
- *   [7:4]   CD destination register
+ *   [3:0]   CD destination register
+ *   [7:4]   AB destination register
  *   [11:8]  SUM destination register
  *   [12]    CD dot product flag
  *   [13]    AB dot product flag
@@ -166,8 +179,8 @@ static void parse_four_inputs(DWORD dword, NV2ACombinerInput inputs[4])
  */
 static void parse_output(DWORD dword, NV2ACombinerOutput *output)
 {
-    output->ab_dst     = (NV2ACombinerRegister)((dword >>  0) & 0xF);
-    output->cd_dst     = (NV2ACombinerRegister)((dword >>  4) & 0xF);
+    output->cd_dst     = (NV2ACombinerRegister)((dword >>  0) & 0xF);
+    output->ab_dst     = (NV2ACombinerRegister)((dword >>  4) & 0xF);
     output->sum_dst    = (NV2ACombinerRegister)((dword >>  8) & 0xF);
     output->cd_dot     = (dword >> 12) & 1;
     output->ab_dot     = (dword >> 13) & 1;
@@ -257,22 +270,22 @@ void d3d8_combiners_from_render_states(const DWORD *rs,
      * Parse final combiner inputs.
      *
      * D3DRS_PSFINALCOMBINERINPUTSABCD packs inputs A,B,C,D as 8 bits each:
-     *   [7:0]=A  [15:8]=B  [23:16]=C  [31:24]=D
+     *   [31:24]=A  [23:16]=B  [15:8]=C  [7:0]=D
      *
      * D3DRS_PSFINALCOMBINERINPUTSEFG packs E,F,G:
-     *   [7:0]=E  [15:8]=F  [23:16]=G  [31:24]=reserved
+     *   [31:24]=E  [23:16]=F  [15:8]=G  [7:0]=reserved
      */
     {
         DWORD abcd = rs[D3DRS_PSFINALCOMBINERINPUTSABCD];
         DWORD efg  = rs[D3DRS_PSFINALCOMBINERINPUTSEFG];
 
-        parse_combiner_input((abcd >>  0) & 0xFF, &state->final_input[0]); /* A */
-        parse_combiner_input((abcd >>  8) & 0xFF, &state->final_input[1]); /* B */
-        parse_combiner_input((abcd >> 16) & 0xFF, &state->final_input[2]); /* C */
-        parse_combiner_input((abcd >> 24) & 0xFF, &state->final_input[3]); /* D */
-        parse_combiner_input((efg  >>  0) & 0xFF, &state->final_input[4]); /* E */
-        parse_combiner_input((efg  >>  8) & 0xFF, &state->final_input[5]); /* F */
-        parse_combiner_input((efg  >> 16) & 0xFF, &state->final_input[6]); /* G */
+        parse_combiner_input((abcd >> 24) & 0xFF, &state->final_input[0]); /* A */
+        parse_combiner_input((abcd >> 16) & 0xFF, &state->final_input[1]); /* B */
+        parse_combiner_input((abcd >>  8) & 0xFF, &state->final_input[2]); /* C */
+        parse_combiner_input((abcd >>  0) & 0xFF, &state->final_input[3]); /* D */
+        parse_combiner_input((efg  >> 24) & 0xFF, &state->final_input[4]); /* E */
+        parse_combiner_input((efg  >> 16) & 0xFF, &state->final_input[5]); /* F */
+        parse_combiner_input((efg  >>  8) & 0xFF, &state->final_input[6]); /* G */
     }
 
     /* Per-stage constant colors */

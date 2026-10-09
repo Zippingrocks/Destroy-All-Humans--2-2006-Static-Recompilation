@@ -35,6 +35,8 @@ ID3D11RenderTargetView *d3d8_GetDefaultRTV(void);
 HWND                 d3d8_GetHWND(void);
 UINT                 d3d8_GetBackbufferWidth(void);
 UINT                 d3d8_GetBackbufferHeight(void);
+UINT                 d3d8_GetViewportWidth(void);
+UINT                 d3d8_GetViewportHeight(void);
 
 /* Current render state array accessor */
 const DWORD         *d3d8_GetRenderStates(void);
@@ -134,6 +136,7 @@ void    d3d8_shaders_shutdown(void);
 /* Bind shaders + input layout for the given FVF, upload transform CBs */
 void    d3d8_shaders_prepare_draw(DWORD fvf);
 void    d3d8_shaders_set_texel_coord_mask(UINT mask);
+void    d3d8_shaders_set_texture_alpha_one_mask(UINT mask);
 
 /* ================================================================
  * NV2A Register Combiner pixel shaders (d3d8_combiners.c)

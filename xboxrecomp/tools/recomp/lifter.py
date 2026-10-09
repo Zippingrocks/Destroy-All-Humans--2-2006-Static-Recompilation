@@ -367,33 +367,36 @@ def _make_condition(jcc, flag_setter, flag_ops):
     if flag_setter in ("comiss", "comisd", "ucomiss", "ucomisd"):
         def _sse_op(op):
             if op.type == "reg" and op.reg and op.reg.startswith("xmm"):
-                return f"{op.reg}.f[0]"
+                lane = "d" if flag_setter.endswith("sd") else "f"
+                return f"{op.reg}.{lane}[0]"
             elif op.type == "reg":
                 return op.reg
             elif op.type == "mem":
-                if op.mem_size == 8:
+                if flag_setter.endswith("sd"):
                     return f"MEMD({_fmt_mem(op)})"
                 return f"MEMF({_fmt_mem(op)})"
             return _fmt_operand_read(op)
         a = _sse_op(flag_ops[0]) if len(flag_ops) >= 1 else "0.0f"
         b = _sse_op(flag_ops[1]) if len(flag_ops) >= 2 else "0.0f"
-        # comiss uses unsigned condition codes (CF, ZF)
+        # COMISS/UCOMISS set CF=ZF=PF=1 for unordered operands; C's
+        # relational/equality operators alone do not implement those flags.
+        unordered = f"(isnan({a}) || isnan({b}))"
         if jcc in ("ja", "jnbe"):
             return f"({a} > {b})", desc
         if jcc in ("jae", "jnb", "jnc"):
             return f"({a} >= {b})", desc
         if jcc in ("jb", "jnae", "jc"):
-            return f"({a} < {b})", desc
+            return f"(({a} < {b}) || {unordered})", desc
         if jcc in ("jbe", "jna"):
-            return f"({a} <= {b})", desc
+            return f"(({a} <= {b}) || {unordered})", desc
         if jcc in ("je", "jz"):
-            return f"({a} == {b})", desc
+            return f"(({a} == {b}) || {unordered})", desc
         if jcc in ("jne", "jnz"):
-            return f"({a} != {b})", desc
+            return f"(({a} != {b}) && !{unordered})", desc
         if jcc == "jp":
-            return f"0 /* {jcc}: unordered/NaN */", desc
+            return unordered, desc
         if jcc == "jnp":
-            return f"1 /* {jcc}: ordered */", desc
+            return f"(!{unordered})", desc
         return None
 
     # SF is the sign bit of the result at the OPERAND's width, not at 32 bits.
@@ -601,9 +604,9 @@ def _make_condition(jcc, flag_setter, flag_ops):
         if rhs is None:
             return None
         if jcc in ("je", "jz"):
-            return f"({rhs} == 0)", desc
+            return "(_flags != 0)", desc
         if jcc in ("jne", "jnz"):
-            return f"({rhs} != 0)", desc
+            return "(_flags == 0)", desc
         return None
 
     # ── bt/bts/btr/btc: bit test, sets CF ──
@@ -703,6 +706,53 @@ def try_match_cmp_jcc(insns, idx, lifter=None):
     target = second.jump_target
     stmt = _emit_cond_goto(cond_expr, second.mnemonic, desc, target, lifter)
     return (stmt, 2)
+
+
+def _try_match_sse_compare_lahf(insns, idx):
+    """Materialize AH for the bounded adjacent scalar-compare + LAHF idiom.
+
+    No operand can change between these two instructions. Snapshot both reads
+    before writing AH because EAX may also address the compare's memory operand.
+    Nonadjacent/cross-block LAHF and unmasked SSE exception traps are not handled
+    by this pattern; it does not replace the general EFLAGS model.
+    """
+    if idx + 1 >= len(insns):
+        return None
+    compare, lahf = insns[idx], insns[idx + 1]
+    if (compare.mnemonic not in ("comiss", "ucomiss", "comisd", "ucomisd")
+            or lahf.mnemonic != "lahf" or lahf.operands
+            or len(compare.operands) != 2):
+        return None
+    double = compare.mnemonic.endswith("sd")
+    lane, scalar, width = ("d", "double", 8) if double else ("f", "float", 4)
+
+    def read(op):
+        if (op.type == "reg" and op.reg
+                and re.fullmatch(r"xmm[0-7]", op.reg)):
+            return f"{op.reg}.{lane}[0]"
+        # Capstone labels COMISD's m64 operand as xmmword/16 bytes in some
+        # versions. The scalar opcode still reads exactly eight bytes.
+        memory_widths = (8, 16) if compare.mnemonic == "comisd" else (width,)
+        if op.type == "mem" and op.mem_size in memory_widths:
+            return f"{'MEMD' if double else 'MEMF'}({_fmt_mem(op)})"
+        return None
+
+    left, right = compare.operands
+    if left.type != "reg":
+        return None
+    a, b = read(left), read(right)
+    if a is None or b is None:
+        return None
+    statement = (
+        f"{{ {scalar} _sse_lahf_a = {a}, _sse_lahf_b = {b}; "
+        "uint32_t _sse_lahf_ah = "
+        "(isnan(_sse_lahf_a) || isnan(_sse_lahf_b)) ? 0x47u : "
+        "(_sse_lahf_a < _sse_lahf_b) ? 0x03u : "
+        "(_sse_lahf_a == _sse_lahf_b) ? 0x42u : 0x02u; "
+        "SET_HI8(eax, _sse_lahf_ah); } "
+        f"/* {compare.mnemonic}; lahf */"
+    )
+    return statement, 2
 
 
 # ── Single instruction lifting ───────────────────────────────
@@ -937,6 +987,8 @@ class Lifter:
             r = _fmt_reg(ops[0].reg)
             return [f"{r} = BSWAP32({r}); /* bswap */"]
         # ── Bit test and modify ──
+        if m in ("bsf", "bsr"):
+            return self._lift_bitscan(insn, ops, m)
         # 386 instructions, so real Xbox code has them. The CRT's float-to-int
         # helper uses `btr` to clear a rounding-control bit of the x87 control
         # word, which is exactly the _control87 shape. Unhandled, they lifted to
@@ -998,7 +1050,7 @@ class Lifter:
                  "cvtsi2sd", "cvtsd2si", "cvttsd2si",
                  "cvtss2sd", "cvtsd2ss",
                  "xorps", "xorpd", "andps", "orps", "andnps",
-                 "movd", "movq",
+                 "movd", "movq", "movntq",
                  "shufps", "unpcklps", "unpckhps",
                  "addps", "subps", "mulps", "divps",
                  "minps", "maxps", "rsqrtss", "rcpss",
@@ -1026,6 +1078,31 @@ class Lifter:
 
         # ── Unhandled ──
         return [f"/* TODO: {m} {insn.op_str} */"]
+
+    def _lift_bitscan(self, insn, ops, kind):
+        """Read the source once, preserve its ZF, and scan 16/32-bit operands.
+
+        The destination is architecturally undefined for a zero source. Keep
+        its incoming value, matching the retail helper's chosen baseline.
+        Capturing ZF before writing the destination matters for bsf eax,eax
+        and for a flags-preserving MOV before a later JZ/SETZ/CMOVZ.
+        """
+        if (len(ops) != 2 or ops[0].type != "reg"
+                or _operand_width(ops[0]) not in (2, 4)
+                or ops[1].type not in ("reg", "mem")):
+            return [f"/* TODO: {kind} {insn.op_str}: unsupported operands */"]
+        source = _fmt_operand_read(ops[1])
+        out = [f"{{ uint32_t _bs_value = (uint32_t)({source});",
+               "_flags = (_bs_value == 0u); /* bit scan ZF */",
+               "if (_bs_value != 0u) {",
+               "    uint32_t _bs_bit = 0;"]
+        if kind == "bsf":
+            out.append("    while ((_bs_value & 1u) == 0u) { _bs_value >>= 1; ++_bs_bit; }")
+        else:
+            out.append("    while ((_bs_value >>= 1) != 0u) { ++_bs_bit; }")
+        out.extend(["    " + _fmt_operand_write(ops[0], "_bs_bit"),
+                    f"}} }} /* {kind} {insn.op_str} */"])
+        return out
 
     # ── MOV family ──
 
@@ -1074,7 +1151,7 @@ class Lifter:
             r = ops[1].reg
             if r in ("al", "bl", "cl", "dl", "ah", "bh", "ch", "dh"):
                 src = f"SX8({src})"
-            elif r in ("ax", "bx", "cx", "dx", "si", "di"):
+            elif r in ("ax", "bx", "cx", "dx", "si", "di", "bp", "sp"):
                 src = f"SX16({src})"
         return [_fmt_operand_write(ops[0], src)]
 
@@ -1210,8 +1287,10 @@ class Lifter:
         dst = _fmt_operand_read(ops[0])
         src = _fmt_operand_read(ops[1])
         cnt = _fmt_operand_read(ops[2])
-        return [_fmt_operand_write(ops[0],
-            f"({dst} << {cnt}) | ({src} >> (32 - {cnt}))") + " /* shld */"]
+        bits = 8 * (_operand_width(ops[0]) or 4)
+        return [f"{{ uint32_t _cnt = (uint32_t)({cnt}) & 31u;",
+                f"  if (_cnt) {{ uint64_t _pair = ((uint64_t)({dst}) << {bits}) | (uint64_t)({src});",
+                "    " + _fmt_operand_write(ops[0], f"(uint32_t)((_pair << _cnt) >> {bits})") + " } } /* shld */"]
 
     def _lift_shrd(self, insn, ops):
         """SHRD: double-precision shift right."""
@@ -1220,8 +1299,10 @@ class Lifter:
         dst = _fmt_operand_read(ops[0])
         src = _fmt_operand_read(ops[1])
         cnt = _fmt_operand_read(ops[2])
-        return [_fmt_operand_write(ops[0],
-            f"({dst} >> {cnt}) | ({src} << (32 - {cnt}))") + " /* shrd */"]
+        bits = 8 * (_operand_width(ops[0]) or 4)
+        return [f"{{ uint32_t _cnt = (uint32_t)({cnt}) & 31u;",
+                f"  if (_cnt) {{ uint64_t _pair = ((uint64_t)({src}) << {bits}) | (uint64_t)({dst});",
+                "    " + _fmt_operand_write(ops[0], "(uint32_t)(_pair >> _cnt)") + " } } /* shrd */"]
 
     def _lift_imul(self, insn, ops):
         nops = len(ops)
@@ -1289,7 +1370,10 @@ class Lifter:
         out = []
         if self.needs_cf:
             out.append(f"if ({cnt}) _cf = (int)((({dst}) >> (({cnt}) - 1)) & 1);")
-        out.append(_fmt_operand_write(ops[0], f"(uint32_t)((int32_t){dst} >> {cnt})"))
+        width = _operand_width(ops[0]) or 4
+        signed_cast = {1: "int8_t", 2: "int16_t"}.get(width, "int32_t")
+        out.append(_fmt_operand_write(
+            ops[0], f"(uint32_t)(({signed_cast}){dst} >> {cnt})"))
         return out
 
     def _lift_rotate(self, insn, ops, m):
@@ -1800,6 +1884,22 @@ class Lifter:
                 return [f"{_fmt_operand_write(ops[0], src)} /* movd */"]
             return [f"/* movd {insn.op_str} */"]
 
+        # MMX movq and movntq are bit-exact 64-bit transfers.  The latter's
+        # non-temporal cache hint has no guest-visible semantic effect, but
+        # dropping the store does: DAH2 uses it for the bulk of indexed-draw
+        # payloads, leaving stale push-buffer commands in place when omitted.
+        if m in ("movq", "movntq"):
+            if nops >= 2:
+                dst, src = ops[0], ops[1]
+                if _is_mmx(dst):
+                    if src.type == "mem":
+                        return [f"{dst.reg} = (uint64_t)SMEM64({_fmt_mem(src)}); /* {m} */"]
+                    if _is_mmx(src):
+                        return [f"{dst.reg} = {src.reg}; /* {m} */"]
+                if dst.type == "mem" and _is_mmx(src):
+                    return [f"SMEM64({_fmt_mem(dst)}) = (int64_t){src.reg}; /* {m} */"]
+            return [f"/* {m} {insn.op_str} */"]
+
         # ── Arithmetic ──
         if m in ("addss", "addsd"):
             if nops >= 2:
@@ -2250,8 +2350,10 @@ class Lifter:
                     f"{pops} /* {m} {insn.op_str} */"]
         if m in ("fcompi", "fcomip", "fucomi", "fucompi", "fucomip", "fcomi"):
             # These set EFLAGS directly (CF, ZF, PF) from FPU comparison
-            # fcompi/fucompi pop st(0) after comparing; fcomi/fucomi do not
-            pops = m.endswith("pi") or m.endswith("ip")
+            # Capstone labels the DB /6 forms as fcompi/fucompi even though DB
+            # F0+i and DB E8+i are the non-popping FCOMI/FUCOMI opcodes. Only
+            # the corresponding DF forms pop ST(0).
+            pops = bool(insn.bytes_hex and insn.bytes_hex[:2].lower() == "df")
             pop_code = " fp_pop();" if pops else ""
             rhs = self._fcom_rhs(ops)
             return [f"g_fp_cmp = RECOMP_FCMP(fp_top(), {rhs});"
@@ -2343,6 +2445,17 @@ def lift_basic_block(lifter, bb, flag_state=None):
 
     while i < len(insns):
         curr = insns[i]
+
+        # Scalar SSE compare + LAHF must materialize AH before the common
+        # TEST AH idiom. The old pair emitted two comments and reused stale AH.
+        match = _try_match_sse_compare_lahf(insns, i)
+        if match:
+            statement, consumed = match
+            stmts.append(statement)
+            last_flag_setter = curr.mnemonic
+            last_flag_ops = list(curr.operands)
+            i += consumed
+            continue
 
         # Try cmp/test + jcc pattern first (2-instruction match)
         match = try_match_cmp_jcc(insns, i, lifter=lifter)

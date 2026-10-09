@@ -236,13 +236,24 @@ void recomp_trace_esp(const char *name, const char *tag);
 /** Read/write N bytes at a flat Xbox memory address. */
 #define MEM8(addr)   (*(volatile uint8_t  *)XBOX_PTR(addr))
 #define MEM16(addr)  (*(volatile uint16_t *)XBOX_PTR(addr))
-static inline volatile uint32_t *recomp_mem32_ptr(uint32_t addr)
+void dah2_watch_natalia_x_access(uint32_t addr, const char *function, int line);
+void dah2_watch_timing_link_access(uint32_t addr, const char *function, int line);
+void dah2_probe_anim_sampler(uint32_t stage, uint32_t sampler, uint32_t target,
+                            uint32_t time, uint32_t cursor, uint32_t icall_target);
+void dah2_probe_anim_event(uint32_t stage, uint32_t object, uint32_t delta,
+                          uint32_t auxiliary);
+extern volatile uint32_t g_dah2_resolver_probe[24];
+static inline volatile uint32_t *recomp_mem32_ptr(uint32_t addr, const char *function, int line)
 {
     if (addr == 0)
         return &g_seh_head;
+    if (addr == 0x858E96F0u)
+        dah2_watch_natalia_x_access(addr, function, line);
+    if (addr == 0x0030FE98u)
+        dah2_watch_timing_link_access(addr, function, line);
     return (volatile uint32_t *)XBOX_PTR(addr);
 }
-#define MEM32(addr)  (*recomp_mem32_ptr((uint32_t)(addr)))
+#define MEM32(addr)  (*recomp_mem32_ptr((uint32_t)(addr), __FUNCTION__, __LINE__))
 
 /** Signed memory reads. */
 #define SMEM8(addr)  (*(volatile int8_t   *)XBOX_PTR(addr))
@@ -251,7 +262,13 @@ static inline volatile uint32_t *recomp_mem32_ptr(uint32_t addr)
 #define SMEM64(addr) (*(volatile int64_t  *)XBOX_PTR(addr))
 
 /** Float/double memory access. */
-#define MEMF(addr)   (*(volatile float    *)XBOX_PTR(addr))
+static inline volatile float *recomp_memf_ptr(uint32_t addr, const char *function, int line)
+{
+    if (addr == 0x858E96F0u)
+        dah2_watch_natalia_x_access(addr, function, line);
+    return (volatile float *)XBOX_PTR(addr);
+}
+#define MEMF(addr)   (*recomp_memf_ptr((uint32_t)(addr), __FUNCTION__, __LINE__))
 #define MEMD(addr)   (*(volatile double   *)XBOX_PTR(addr))
 
 /* ================================================================

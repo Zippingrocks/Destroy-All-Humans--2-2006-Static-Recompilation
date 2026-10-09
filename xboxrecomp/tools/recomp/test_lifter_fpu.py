@@ -165,6 +165,16 @@ class FpuLifterTest(unittest.TestCase):
         self.assertTrue(lifted[0].startswith("g_fp_cmp ="))
         self.assertNotIn("_fpu_cmp", lifted[0])
 
+    def test_fcomi_db_does_not_pop_but_fcomip_df_does(self):
+        operand = Operand(type="reg", reg="st(1)")
+        no_pop = Instruction(0, 2, "fcompi", "st(1)", "dbf1")
+        no_pop.operands = [operand]
+        pop = Instruction(0, 2, "fcompi", "st(1)", "dff1")
+        pop.operands = [operand]
+
+        self.assertNotIn("fp_pop()", Lifter().lift_instruction(no_pop)[0])
+        self.assertIn("fp_pop()", Lifter().lift_instruction(pop)[0])
+
     def test_fxch_swaps_with_the_explicit_register(self):
         """Capstone reports fxch with both operands -- (st(0), st(i)) -- and it
         is the only x87 form that does. Reading operand 0 picked up the

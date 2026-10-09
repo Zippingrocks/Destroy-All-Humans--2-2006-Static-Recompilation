@@ -1,0 +1,2 @@
+# One one-poll Start pulse after the first 300 retail input polls.
+300 1 0010 0 0 0 0 0 0

@@ -145,12 +145,109 @@ def checkpoint_capture(qmp, gdb, name, address):
     if registers["esp"] is not None:
         sp = int(registers["esp"], 16)
         result["stack"] = memory_record(gdb, sp, 0x80)
+        if registers.get("ebp") is not None and address in {
+            0x002871E2,
+            0x0028750A,
+            0x0028800A,
+            0x00288048,
+            0x00288202,
+            0x00288339,
+            0x00288574,
+        }:
+            frame = int(registers["ebp"], 16)
+            result["bink_decoder_frame"] = memory_record(
+                gdb, (frame - 0x140) & 0xFFFFFFFF, 0x180
+            )
         if address == 0x24DCB0:
             pointer = memory_record(gdb, (sp + 0x14) & 0xffffffff, 4)
             result["presentation_parameters_pointer"] = pointer
             pp = u32(pointer)
             if pp:
                 result["presentation_parameters"] = memory_record(gdb, pp, 0x44)
+        if address == 0x1621B0:
+            arguments = []
+            for index, length in enumerate((0x40, 0x10, 0x40, 0x40, 0)):
+                pointer_record = memory_record(gdb, (sp + 4 + index * 4) & 0xffffffff, 4)
+                pointer = u32(pointer_record)
+                entry = {"pointer": pointer_record}
+                if length and pointer and pointer <= 0xffffffff - length:
+                    entry["memory"] = memory_record(gdb, pointer, length)
+                arguments.append(entry)
+            result["visibility_arguments"] = arguments
+            ecx = registers.get("ecx")
+            if ecx is not None:
+                renderer = int(ecx, 16)
+                if renderer <= 0xffffffff - 0x2a0:
+                    result["visibility_renderer"] = memory_record(gdb, renderer, 0x2a0)
+        if address == 0x16CDA0:
+            ecx_value = registers.get("ecx")
+            if ecx_value is not None:
+                destination = int(ecx_value, 16)
+                if destination <= 0xffffffff - 0x80:
+                    result["transform_destination"] = memory_record(gdb, destination, 0x80)
+                    base_pointer_record = memory_record(gdb, (destination + 0x5c) & 0xffffffff, 4)
+                    result["transform_base_pointer"] = base_pointer_record
+                    base_pointer = u32(base_pointer_record)
+                    if base_pointer and base_pointer <= 0xffffffff - 0x40:
+                        result["transform_base"] = memory_record(gdb, base_pointer, 0x40)
+            argument_pointer_record = memory_record(gdb, (sp + 4) & 0xffffffff, 4)
+            result["transform_argument_pointer"] = argument_pointer_record
+            argument_pointer = u32(argument_pointer_record)
+            if argument_pointer and argument_pointer <= 0xffffffff - 0x20:
+                result["transform_argument"] = memory_record(gdb, argument_pointer, 0x20)
+        if address == 0x1603D0:
+            ecx_value = registers.get("ecx")
+            if ecx_value is not None:
+                destination = int(ecx_value, 16)
+                if destination <= 0xffffffff - 0x110:
+                    result["scene_load_destination"] = memory_record(gdb, destination, 0x110)
+            descriptor_pointer_record = memory_record(gdb, (sp + 4) & 0xffffffff, 4)
+            result["scene_load_descriptor_pointer"] = descriptor_pointer_record
+            descriptor = u32(descriptor_pointer_record)
+            if descriptor and descriptor <= 0xffffffff - 0x80:
+                result["scene_load_descriptor"] = memory_record(gdb, descriptor, 0x80)
+        if address == 0x15D3B0:
+            ecx_value = registers.get("ecx")
+            if ecx_value is not None:
+                destination = int(ecx_value, 16)
+                if destination <= 0xffffffff - 0x110:
+                    result["node_transform_destination"] = memory_record(gdb, destination, 0x110)
+            vector_pointer_record = memory_record(gdb, (sp + 4) & 0xffffffff, 4)
+            result["node_transform_vector_pointer"] = vector_pointer_record
+            vector_pointer = u32(vector_pointer_record)
+            if vector_pointer and vector_pointer <= 0xffffffff - 0x10:
+                result["node_transform_vector"] = memory_record(gdb, vector_pointer, 0x10)
+        if address == 0x118E17:
+            output_pointer_record = memory_record(gdb, (sp + 0x14) & 0xffffffff, 4)
+            result["resolver_output_pointer"] = output_pointer_record
+            output_pointer = u32(output_pointer_record)
+            if output_pointer and output_pointer <= 0xffffffff - 0x30:
+                result["resolver_output"] = memory_record(gdb, output_pointer, 0x30)
+            esi_value = registers.get("esi")
+            if esi_value is not None:
+                outer_slot = int(esi_value, 16)
+                result["resolver_outer_slot"] = memory_record(gdb, outer_slot, 0x10)
+                outer_pointer = u32(result["resolver_outer_slot"])
+                if outer_pointer and outer_pointer <= 0xffffffff - 0x30:
+                    result["resolver_outer"] = memory_record(gdb, outer_pointer, 0x30)
+        if address in (0x1785B6, 0x17861E, 0x178713):
+            result["bounds_stack"] = memory_record(gdb, sp, 0x340)
+            eax_value = registers.get("eax")
+            if eax_value is not None:
+                bounds_pointer = int(eax_value, 16)
+                if bounds_pointer <= 0xffffffff - 0x40:
+                    result["bounds_source"] = memory_record(gdb, bounds_pointer, 0x40)
+        if address in (0x15D900, 0x15D907):
+            edi_value = registers.get("edi")
+            if edi_value is not None:
+                node = int(edi_value, 16)
+                if node <= 0xffffffff - 0x110:
+                    result["node_before_after"] = memory_record(gdb, node, 0x110)
+                    payload_pointer_record = memory_record(gdb, node + 0xe8, 4)
+                    result["node_payload_pointer"] = payload_pointer_record
+                    payload = u32(payload_pointer_record)
+                    if payload and payload <= 0xffffffff - 0x200:
+                        result["node_payload"] = memory_record(gdb, payload, 0x200)
     result["device_global"] = memory_record(gdb, 0x25E5A8, 4)
     result["comparison_globals"] = {
         f"0x{address:08x}": memory_record(gdb, address, 4)
@@ -202,6 +299,8 @@ def main(argv=None):
     parser.add_argument("--io-timeout", type=float, default=3)
     parser.add_argument("--poll-interval", type=float, default=0.05)
     parser.add_argument("--address", type=lambda value: int(value, 0))
+    parser.add_argument("--ecx-match", type=lambda value: int(value, 0), help="Skip checkpoint hits until ECX equals this value")
+    parser.add_argument("--max-hits", type=int, default=1, help="Maximum checkpoint hits examined when filtering")
     parser.add_argument("--checkpoint", action="append", type=parse_checkpoint, help="Override trace defaults with ordered NAME:0xADDRESS")
     parser.add_argument("--reset", action="store_true", help="Reset owned guest before tracing")
     parser.add_argument("--write-watch", action="store_true", help="Treat checkpoints as 4-byte guest write watchpoints")
@@ -215,6 +314,10 @@ def main(argv=None):
         parser.error("timeouts and poll interval must be positive")
     if args.command == "checkpoint" and (args.address is None or not 0 <= args.address <= 0xffffffff):
         parser.error("checkpoint requires a 32-bit --address")
+    if args.ecx_match is not None and not 0 <= args.ecx_match <= 0xffffffff:
+        parser.error("--ecx-match requires a 32-bit value")
+    if args.max_hits < 1 or args.max_hits > 100000:
+        parser.error("--max-hits must be between 1 and 100000")
     if args.command in {"trace", "checkpoint"} and args.output is None:
         parser.error("trace/checkpoint requires --output to preserve partial results")
     if args.command == "screendump" and args.screenshot is None:
@@ -262,13 +365,24 @@ def main(argv=None):
                 active_breakpoints.add(address)
                 gdb.breakpoint(address, kind=2 if args.write_watch else 1, length=4 if args.write_watch else 1)
                 result["cleanup"]["breakpoints_remaining"] = [f"0x{value:08x}" for value in sorted(active_breakpoints)]
-                qmp.execute("cont")
                 try:
-                    attempt["stop_status"] = wait_stopped(qmp, args.timeout, args.poll_interval)
-                    attempt.update(checkpoint_capture(qmp, gdb, name, address))
-                    if args.write_watch:
-                        attempt["trigger_eip"] = attempt["registers"]["i386"]["eip"]
-                        attempt["hit"] = True
+                    for hit_index in range(args.max_hits):
+                        qmp.execute("cont")
+                        attempt["stop_status"] = wait_stopped(qmp, args.timeout, args.poll_interval)
+                        registers = gdb.registers()["i386"]
+                        if registers["eip"] is None or int(registers["eip"], 16) != address:
+                            raise ProbeError(f"Guest stopped away from checkpoint {name}")
+                        attempt["examined_hits"] = hit_index + 1
+                        if args.ecx_match is not None and (registers["ecx"] is None or int(registers["ecx"], 16) != args.ecx_match):
+                            save()
+                            continue
+                        attempt.update(checkpoint_capture(qmp, gdb, name, address))
+                        if args.write_watch:
+                            attempt["trigger_eip"] = attempt["registers"]["i386"]["eip"]
+                            attempt["hit"] = True
+                        break
+                    else:
+                        raise ProbeError(f"No ECX match after {args.max_hits} checkpoint hits")
                     save()
                     if not attempt["hit"]:
                         raise ProbeError(f"Guest stopped away from checkpoint {name}")

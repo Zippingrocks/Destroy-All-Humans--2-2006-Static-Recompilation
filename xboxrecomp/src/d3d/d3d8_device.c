@@ -358,6 +358,8 @@ ID3D11RenderTargetView *d3d8_GetDefaultRTV(void) { return g_device_state.default
 HWND                 d3d8_GetHWND(void) { return g_device_state.hwnd; }
 UINT                 d3d8_GetBackbufferWidth(void) { return g_device_state.width; }
 UINT                 d3d8_GetBackbufferHeight(void) { return g_device_state.height; }
+UINT                 d3d8_GetViewportWidth(void) { return g_device_state.viewport.Width; }
+UINT                 d3d8_GetViewportHeight(void) { return g_device_state.viewport.Height; }
 const DWORD         *d3d8_GetRenderStates(void) { return g_device_state.render_states; }
 const DWORD         *d3d8_GetTSS(DWORD stage) { return (stage < MAX_TEXTURE_STAGES) ? g_device_state.tss[stage] : NULL; }
 const D3DMATRIX     *d3d8_GetTransform(D3DTRANSFORMSTATETYPE type) {

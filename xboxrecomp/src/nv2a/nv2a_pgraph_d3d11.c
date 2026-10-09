@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <malloc.h>
 #include <math.h>
+#include <intrin.h>
 
 /* D3D8 device — we include the full header for COM vtable access */
 #include "../d3d/d3d8_internal.h"
@@ -26,6 +27,47 @@ extern IDirect3DDevice8 *xbox_GetD3DDevice(void);
 extern UINT d3d8_GetBackbufferWidth(void);
 extern UINT d3d8_GetBackbufferHeight(void);
 #include "nv2a_parity_capture.h"
+
+/* The diagnostic switches in this file (and nv2a_indexed_draw.h) are probed
+ * from per-draw / per-vertex code. A real getenv() walks the whole process
+ * environment under a lock each time and was ~50% of frame-thread time in the
+ * title scene. The environment is never modified at runtime, so memoise by the
+ * string-literal address (all call sites pass literals). Hits are lock-free;
+ * the (rare) first lookup of a name takes a lock and publishes the key last. */
+#define NV2A_ENV_SLOTS 512u
+typedef struct { const char *volatile key; const char *val; } nv2a_env_slot;
+static nv2a_env_slot s_nv2a_env[NV2A_ENV_SLOTS];
+static SRWLOCK s_nv2a_env_lock = SRWLOCK_INIT;
+
+static const char *nv2a_cached_getenv(const char *name)
+{
+    size_t h = ((size_t)name >> 3) * 2654435761u;
+    for (unsigned n = 0; n < NV2A_ENV_SLOTS; n++) {
+        nv2a_env_slot *s = &s_nv2a_env[(h + n) & (NV2A_ENV_SLOTS - 1u)];
+        const char *k = s->key;
+        if (k == name) { _ReadWriteBarrier(); return s->val; }
+        if (!k) {
+            const char *v;
+            AcquireSRWLockExclusive(&s_nv2a_env_lock);
+            k = s->key;
+            if (k == name) {
+                v = s->val;
+            } else if (!k) {
+                v = getenv(name);
+                s->val = v;
+                _ReadWriteBarrier();
+                s->key = name;
+            } else {
+                ReleaseSRWLockExclusive(&s_nv2a_env_lock);
+                continue; /* another name took this slot: keep probing */
+            }
+            ReleaseSRWLockExclusive(&s_nv2a_env_lock);
+            return v;
+        }
+    }
+    return getenv(name);
+}
+#define getenv(name) nv2a_cached_getenv(name)
 
 /* Global.txd texture lookup */
 /* Game-specific texture lookup - only available when GAME_HAS_FONT_ATLAS is defined */
@@ -145,7 +187,13 @@ static struct {
     IDirect3DTexture8 *array_texture;
     unsigned array_texture_width, array_texture_height;
     struct {
-        uint32_t guest_offset;
+        uint32_t guest_offset, format;
+        unsigned width, height;
+        uint64_t content_hash;
+        IDirect3DTexture8 *texture;
+    } scene_textures[16];
+    struct {
+        uint32_t guest_offset,zeta_offset;
         unsigned width,height;
         IDirect3DTexture8 *texture;
         ID3D11RenderTargetView *rtv;
@@ -153,15 +201,22 @@ static struct {
         ID3D11DepthStencilView *dsv;
     } array_surfaces[4];
     struct {
-        unsigned kind,profile,count,mode;
-        uint32_t target,texture,clip_h,clip_v,combiner;
-    } recent_draws[64];
+        uint32_t guest_offset;
+        unsigned width,height;
+        ID3D11Texture2D *depth;
+        ID3D11DepthStencilView *dsv;
+        UINT pending_clear_flags;
+        float pending_clear_depth;
+        UINT8 pending_clear_stencil;
+    } array_depths[4];
+    PgraphD3D11RecentDraw recent_draws[64];
     unsigned recent_draw_cursor,recent_draw_total;
 
     /* Clear state */
     uint32_t clear_color;
     uint32_t clear_rect_h;  /* (width << 16) | x */
     uint32_t clear_rect_v;  /* (height << 16) | y */
+    int pending_scene_depth_replay;
 
     /* Render state cache */
     int depth_test;
@@ -202,18 +257,55 @@ static struct {
 } g_pg;
 /* Opt-in, bounded per-present command summary used to distinguish a missing
  * guest scene stream from renderer-side draw rejection. */
-static struct {
-    uint32_t methods;
-    uint32_t begins;
-    uint32_t ends;
-    uint32_t begin_modes[11];
-    uint32_t element16_words;
-    uint32_t element32_words;
-    uint32_t draw_arrays_words;
-    uint32_t draw_arrays_vertices;
-    uint32_t inline_words;
-    uint32_t clears;
-} g_pg_frame_methods;
+static PgraphD3D11FrameMethods g_pg_frame_methods;
+static PgraphD3D11FrameMethods g_pg_last_frame_methods;
+
+static PgraphD3D11FrameProfiles g_pg_frame_profiles;
+static PgraphD3D11FrameProfiles g_pg_last_frame_profiles;
+
+static int pgraph_profile_counters_enabled(void)
+{
+    static int enabled=-1;
+    if(enabled<0) {
+        char flag[8];
+        DWORD length=GetEnvironmentVariableA("DAH2_PARITY_TIMING_MEMORY",flag,sizeof(flag));
+        enabled=length==1 && flag[0]=='1';
+        if(!enabled) {
+            length=GetEnvironmentVariableA("DAH2_PARITY_STATE_MEMORY",flag,sizeof(flag));
+            enabled=length==1 && flag[0]=='1';
+        }
+    }
+    return enabled;
+}
+
+/* Constant work once per checked draw, never once per vertex. */
+static void pgraph_record_profile_result(unsigned profile,unsigned source,
+                                         unsigned primitives,int rejected)
+{
+    if(!pgraph_profile_counters_enabled() || profile>=PGRAPH_D3D11_PROFILE_COUNT) return;
+    if(rejected) g_pg_frame_profiles.rejected[profile]++;
+    else if(!primitives) g_pg_frame_profiles.clipped[profile]++;
+    else {
+        g_pg_frame_profiles.accepted[profile]++;
+        if(source==3u) g_pg_frame_profiles.accepted_inline[profile]++;
+    }
+}
+
+static void pgraph_profile_frame_end(void)
+{
+    if(!pgraph_profile_counters_enabled()) return;
+    g_pg_last_frame_profiles=g_pg_frame_profiles;
+    memset(&g_pg_frame_profiles,0,sizeof(g_pg_frame_profiles));
+}
+
+typedef struct {
+    uint32_t frame, subchannel, method, parameter;
+    uint64_t caller;
+    uint32_t thread_id, reserved;
+} Dah2PgraphMethodHistory;
+
+volatile uint32_t g_dah2_pgraph_method_history_cursor;
+volatile Dah2PgraphMethodHistory g_dah2_pgraph_method_history[65536];
 
 static int pgraph_method_hist_enabled(void)
 {
@@ -222,8 +314,25 @@ static int pgraph_method_hist_enabled(void)
         char flag[8];
         DWORD length = GetEnvironmentVariableA("DAH2_METHOD_HIST", flag, sizeof(flag));
         enabled = length == 1 && flag[0] == '1';
+        if (!enabled) {
+            length = GetEnvironmentVariableA("DAH2_PARITY_STATE_MEMORY", flag, sizeof(flag));
+            enabled = length == 1 && flag[0] == '1';
+        }
     }
     return enabled;
+}
+
+static int pgraph_draw_state_enabled(void)
+{
+    static int enabled=-1;
+    if(enabled<0) {
+        char flag[8];
+        DWORD length=GetEnvironmentVariableA("DAH2_DRAW_STATE_MEMORY",flag,sizeof(flag));
+        enabled=length==1 && flag[0]=='1';
+    }
+    /* Full per-draw snapshots can be collected with timing telemetry without
+     * the per-method history writes. Existing history diagnostics retain them. */
+    return enabled || pgraph_method_hist_enabled();
 }
 
 static uint32_t pgraph_method_hist_limit(void)
@@ -254,6 +363,10 @@ static float u2f(uint32_t u) {
     return x.f;
 }
 
+static uint32_t pgraph_surface_nonblack(uint32_t guest_offset);
+static void pgraph_draw_surface_probe_before(unsigned profile);
+static void pgraph_draw_surface_probe_after(void);
+
 #include "nv2a_indexed_draw.h"
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -263,6 +376,8 @@ static float u2f(uint32_t u) {
 void pgraph_d3d11_init(void)
 {
     memset(&g_pg, 0, sizeof(g_pg));
+    memset(&g_pg_frame_profiles,0,sizeof(g_pg_frame_profiles));
+    memset(&g_pg_last_frame_profiles,0,sizeof(g_pg_last_frame_profiles));
     g_pg.vert_stride = INLINE_VERT_DWORDS;  /* Default: 5 dwords per vertex */
     g_pg.clear_color = 0xFF000000;
     g_pg.color_mask = 0x01010101;
@@ -291,11 +406,27 @@ void pgraph_d3d11_shutdown(void)
             g_pg.array_surfaces[i].texture=NULL;
         }
     }
+    for (unsigned i=0;i<4;i++) {
+        if (g_pg.array_depths[i].dsv) {
+            ID3D11DepthStencilView_Release(g_pg.array_depths[i].dsv);
+            g_pg.array_depths[i].dsv=NULL;
+        }
+        if (g_pg.array_depths[i].depth) {
+            ID3D11Texture2D_Release(g_pg.array_depths[i].depth);
+            g_pg.array_depths[i].depth=NULL;
+        }
+    }
     if (g_pg.array_texture) {
         IDirect3DDevice8 *dev = xbox_GetD3DDevice();
         if (dev) dev->lpVtbl->SetTexture(dev,0,NULL);
         g_pg.array_texture->lpVtbl->Release(g_pg.array_texture);
         g_pg.array_texture = NULL;
+    }
+    for (unsigned i=0;i<16;i++) {
+        if (g_pg.scene_textures[i].texture) {
+            g_pg.scene_textures[i].texture->lpVtbl->Release(g_pg.scene_textures[i].texture);
+            g_pg.scene_textures[i].texture=NULL;
+        }
     }
     g_pg.initialized = 0;
     fprintf(stderr, "[PGRAPH-D3D11] Translator shut down (draws=%u, verts=%u)\n",
@@ -543,14 +674,37 @@ static void submit_draw(void)
     if (g_pg.index_count || g_pg.draw_error) {
         submit_indexed_draw();
     } else if (g_pg.inline_count) {
+        if(g_pg.registers[NV097_SET_TRANSFORM_EXECUTION_MODE/4]==6u) {
+            uint32_t formats[NV2A_VP_ATTRIBUTES],count=0;
+            unsigned bad;
+            for(unsigned a=0;a<NV2A_VP_ATTRIBUTES;a++)
+                formats[a]=g_pg.registers[(NV097_SET_VERTEX_DATA_ARRAY_FORMAT+a*4)/4];
+            NV2AVPStatus status=nv2a_inline_array_layout(formats,&g_pg_inline_layout,&bad);
+            if(status!=NV2A_VP_OK) {
+                pgraph_reject_draw(PGRAPH_REJECT_STATE,bad<NV2A_VP_ATTRIBUTES ?
+                    NV097_SET_VERTEX_DATA_ARRAY_FORMAT+bad*4 : NV097_INLINE_ARRAY);
+            } else if(nv2a_inline_array_count(&g_pg_inline_layout,g_pg.inline_count,
+                      MAX_INLINE_VERTS,&count)!=NV2A_VP_OK) {
+                pgraph_reject_draw(PGRAPH_REJECT_LIMIT,NV097_INLINE_ARRAY);
+            } else {
+                /* Sequential indices preserve the authentic inline topology
+                 * while sharing the shader VM and the complete render state. */
+                for(unsigned i=0;i<count;i++)g_pg.indices[i]=i;
+                g_pg.index_count=count;
+                g_pg.index_source=3u;
+                submit_indexed_draw();
+            }
+        } else {
 #ifdef GAME_HAS_FONT_ATLAS
-        submit_inline_legacy_draw();
+            submit_inline_legacy_draw();
 #else
-        pgraph_reject_draw(PGRAPH_REJECT_INLINE,0);
+            pgraph_reject_draw(PGRAPH_REJECT_INLINE,0);
 #endif
+        }
     }
     g_pg.index_count=0;
     g_pg.inline_count=0;
+    g_pg.index_source=0;
 }
 
 int pgraph_d3d11_method(int subchannel, uint32_t method, uint32_t param)
@@ -560,6 +714,19 @@ int pgraph_d3d11_method(int subchannel, uint32_t method, uint32_t param)
 
     if (!g_pg.initialized)
         return 0;
+
+    if (pgraph_method_hist_enabled()) {
+        uint32_t sequence = g_dah2_pgraph_method_history_cursor++;
+        volatile Dah2PgraphMethodHistory *record =
+            &g_dah2_pgraph_method_history[sequence & 65535u];
+        record->frame = g_pg.stats.frames;
+        record->subchannel = (uint32_t)subchannel;
+        record->method = method;
+        record->parameter = param;
+        record->caller = (uint64_t)(uintptr_t)_ReturnAddress();
+        record->thread_id = GetCurrentThreadId();
+        record->reserved = 0;
+    }
 
     pgraph_parity_method(method, param);
     if (pgraph_method_hist_enabled()) {
@@ -630,8 +797,11 @@ int pgraph_d3d11_method(int subchannel, uint32_t method, uint32_t param)
     /* ── Inline Vertex Data ── */
     case NV097_INLINE_ARRAY:
         if (g_pg.index_count) g_pg.draw_error=PGRAPH_REJECT_INLINE;
-        if (g_pg.in_draw && g_pg.inline_count < MAX_INLINE_VERTS * INLINE_VERT_DWORDS) {
-            g_pg.inline_data[g_pg.inline_count++] = param;
+        if (g_pg.in_draw) {
+            if(g_pg.inline_count<sizeof(g_pg.inline_data)/sizeof(g_pg.inline_data[0]))
+                g_pg.inline_data[g_pg.inline_count++]=param;
+            else
+                g_pg.draw_error=PGRAPH_REJECT_LIMIT;
         }
         return 1;
 
@@ -796,7 +966,7 @@ void pgraph_d3d11_flush(void)
         g_pg.in_draw = 0;
     }
     g_pg.stats.frames++;
-    if (pgraph_method_hist_enabled() && frame <= pgraph_method_hist_limit() &&
+    if (getenv("DAH2_METHOD_HIST") && frame <= pgraph_method_hist_limit() &&
         (g_pg_frame_methods.methods || (frame % 120) == 0)) {
         fprintf(stderr,
                 "[PGRAPH-FRAME-METHODS] frame=%u methods=%u begin=%u end=%u "
@@ -815,7 +985,9 @@ void pgraph_d3d11_flush(void)
                 g_pg_frame_methods.inline_words, g_pg_frame_methods.clears,
                 g_pg.stats.draw_calls, g_pg.stats.rejected_draws);
     }
+    g_pg_last_frame_methods = g_pg_frame_methods;
     memset(&g_pg_frame_methods, 0, sizeof(g_pg_frame_methods));
+    pgraph_profile_frame_end();
 }
 void pgraph_d3d11_set_chyron_scroll(uint32_t pixels)
 {
@@ -825,4 +997,125 @@ void pgraph_d3d11_set_chyron_scroll(uint32_t pixels)
 void pgraph_d3d11_get_stats(PgraphD3D11Stats *out)
 {
     if (out) *out = g_pg.stats;
+}
+
+void pgraph_d3d11_get_last_frame_methods(PgraphD3D11FrameMethods *out)
+{
+    if (out) *out = g_pg_last_frame_methods;
+}
+
+void pgraph_d3d11_get_last_frame_profiles(PgraphD3D11FrameProfiles *out)
+{
+    if(!out) return;
+    if(pgraph_profile_counters_enabled()) *out=g_pg_last_frame_profiles;
+    else memset(out,0,sizeof(*out));
+}
+
+void pgraph_d3d11_get_recent_draws(PgraphD3D11RecentDraw out[4])
+{
+    unsigned available, i;
+    if (!out) return;
+    memset(out, 0, sizeof(*out) * 4u);
+    available = g_pg.recent_draw_total < 4u ? g_pg.recent_draw_total : 4u;
+    for (i = 0; i < available; ++i)
+        out[4u - available + i] = g_pg.recent_draws[
+            (g_pg.recent_draw_cursor + 64u - available + i) % 64u];
+}
+
+static uint32_t pgraph_surface_nonblack(uint32_t guest_offset)
+{
+    int slot = pgraph_surface_index(guest_offset);
+    ID3D11Texture2D *staging = NULL;
+    D3D11_TEXTURE2D_DESC desc, staging_desc;
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    uint64_t nonblack = 0;
+    unsigned x, y;
+    if (slot < 0) return UINT32_MAX;
+    D3D8Texture *source = (D3D8Texture *)g_pg.array_surfaces[slot].texture;
+    ID3D11Texture2D_GetDesc(source->d3d11_texture, &desc);
+    staging_desc = desc;
+    staging_desc.Usage = D3D11_USAGE_STAGING;
+    staging_desc.BindFlags = 0;
+    staging_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    staging_desc.MiscFlags = 0;
+    if (FAILED(ID3D11Device_CreateTexture2D(d3d8_GetD3D11Device(),
+        &staging_desc, NULL, &staging))) return UINT32_MAX;
+    ID3D11DeviceContext_CopyResource(d3d8_GetD3D11Context(),
+        (ID3D11Resource *)staging, (ID3D11Resource *)source->d3d11_texture);
+    memset(&mapped, 0, sizeof(mapped));
+    if (FAILED(ID3D11DeviceContext_Map(d3d8_GetD3D11Context(),
+        (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &mapped))) {
+        ID3D11Texture2D_Release(staging);
+        return UINT32_MAX;
+    }
+    for (y = 0; y < desc.Height; ++y) {
+        const uint32_t *row = (const uint32_t *)((const unsigned char *)mapped.pData + (size_t)y * mapped.RowPitch);
+        for (x = 0; x < desc.Width; ++x) nonblack += (row[x] & 0x00FFFFFFu) != 0;
+    }
+    ID3D11DeviceContext_Unmap(d3d8_GetD3D11Context(),
+        (ID3D11Resource *)staging, 0);
+    ID3D11Texture2D_Release(staging);
+    return nonblack > UINT32_MAX ? UINT32_MAX : (uint32_t)nonblack;
+}
+
+static PgraphD3D11DrawSurfaceProbe g_draw_surface_probe[4];
+static unsigned g_draw_surface_probe_count;
+static int g_draw_surface_probe_pending;
+static int g_draw_surface_probe_complete;
+
+static int pgraph_draw_surface_probe_enabled(void)
+{
+    static int initialized;
+    static int enabled;
+    if (!initialized) {
+        char flag[8];
+        DWORD length = GetEnvironmentVariableA("DAH2_PARITY_SURFACE_PROBE",
+                                               flag, sizeof(flag));
+        enabled = length == 1 && flag[0] == '1';
+        initialized = 1;
+    }
+    return enabled;
+}
+
+static void pgraph_draw_surface_probe_before(unsigned profile)
+{
+    static const unsigned expected_profiles[4] = {4u, 5u, 5u, 3u};
+    PgraphD3D11DrawSurfaceProbe *probe;
+    uint32_t target = g_pg.registers[NV097_SET_SURFACE_COLOR_OFFSET / 4];
+    uint32_t texture = g_pg.registers[NV097_SET_TEXTURE_OFFSET / 4];
+    if (!pgraph_draw_surface_probe_enabled() ||
+        g_draw_surface_probe_complete || g_draw_surface_probe_pending)
+        return;
+    if (profile != expected_profiles[g_draw_surface_probe_count]) {
+        g_draw_surface_probe_count = 0;
+        if (profile != expected_profiles[0]) return;
+    }
+    if ((g_draw_surface_probe_count == 0u && target != 0x07743000u) ||
+        (g_draw_surface_probe_count == 1u && target != 0x0778E000u) ||
+        (g_draw_surface_probe_count == 2u && target != 0x07743000u))
+        return;
+    probe = &g_draw_surface_probe[g_draw_surface_probe_count];
+    probe->target = target;
+    probe->texture = texture;
+    probe->source_before_nonblack = pgraph_surface_nonblack(texture);
+    probe->target_after_nonblack = UINT32_MAX;
+    g_draw_surface_probe_pending = 1;
+}
+
+static void pgraph_draw_surface_probe_after(void)
+{
+    PgraphD3D11DrawSurfaceProbe *probe;
+    if (!g_draw_surface_probe_pending || g_draw_surface_probe_complete) return;
+    probe = &g_draw_surface_probe[g_draw_surface_probe_count];
+    probe->target_after_nonblack = pgraph_surface_nonblack(probe->target);
+    g_draw_surface_probe_pending = 0;
+    if (++g_draw_surface_probe_count == 4u)
+        g_draw_surface_probe_complete = 1;
+}
+
+int pgraph_d3d11_get_draw_surface_probe(PgraphD3D11DrawSurfaceProbe out[4])
+{
+    if (!out) return 0;
+    memcpy(out, g_draw_surface_probe, sizeof(g_draw_surface_probe));
+    return g_draw_surface_probe_complete;
 }

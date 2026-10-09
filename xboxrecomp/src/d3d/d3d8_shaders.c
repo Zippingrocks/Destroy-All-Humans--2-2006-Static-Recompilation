@@ -125,6 +125,20 @@ static const char g_vs_source[] =
     "        o.pos.y = 1.0 - (input.pos.y / ScreenSize.y) * 2.0;\n"
     "        o.pos.z = input.pos.z;\n"
     "        o.pos.w = 1.0;\n"
+    /* D3D8 XYZRHW stores reciprocal clip W. Preserve its sign when
+     * reconstructing homogeneous coordinates so behind-camera NV2A vertices
+     * are clipped instead of becoming enormous front-facing triangles. */
+    "        if (isfinite(input.pos.w) && input.pos.w != 0.0) {\n"
+    "            float clip_w = 1.0 / input.pos.w;\n"
+    "            if (isfinite(clip_w) && clip_w != 0.0) {\n"
+    "                o.pos.xyz *= clip_w;\n"
+    "                o.pos.w = clip_w;\n"
+    "            } else {\n"
+    "                o.pos = float4(0, 0, 0, -1);\n"
+    "            }\n"
+    "        } else {\n"
+    "            o.pos = float4(0, 0, 0, -1);\n"
+    "        }\n"
     "        o.diffuse = (Flags & FLAG_HAS_DIFFUSE) ? input.diffuse.bgra : float4(1,1,1,1);\n"
     "        if (Flags & FLAG_HAS_SPECULAR) o.specular = input.specular.bgra;\n"
     "        return o;\n"
@@ -306,6 +320,10 @@ static const char g_ps_source[] =
     "    texels[1] = tex1.Sample(samp1, tc1);\n"
     "    texels[2] = tex2.Sample(samp2, tc2);\n"
     "    texels[3] = tex3.Sample(samp3, tc3);\n"
+    "    if (PSFlags &  128u) texels[0].a = 1.0;\n"
+    "    if (PSFlags &  256u) texels[1].a = 1.0;\n"
+    "    if (PSFlags &  512u) texels[2].a = 1.0;\n"
+    "    if (PSFlags & 1024u) texels[3].a = 1.0;\n"
     "\n"
     "    // Process up to 4 texture stages\n"
     "    [unroll] for (uint i = 0; i < 4; i++) {\n"
@@ -389,6 +407,7 @@ static ID3D11Buffer        *g_vs_cb = NULL;      /* VS transform CB (b0) */
 static ID3D11Buffer        *g_vs_light_cb = NULL; /* VS lighting CB (b1) */
 static ID3D11Buffer        *g_ps_cb = NULL;       /* PS constant buffer */
 static UINT                 g_texel_coord_mask;
+static UINT                 g_texture_alpha_one_mask;
 
 /* VS transform constant buffer layout (must match HLSL TransformCB) */
 typedef struct {
@@ -733,6 +752,11 @@ void d3d8_shaders_set_texel_coord_mask(UINT mask)
     g_texel_coord_mask = mask & 15u;
 }
 
+void d3d8_shaders_set_texture_alpha_one_mask(UINT mask)
+{
+    g_texture_alpha_one_mask = mask & 15u;
+}
+
 void d3d8_shaders_prepare_draw(DWORD fvf)
 {
     ID3D11DeviceContext *ctx = d3d8_GetD3D11Context();
@@ -768,8 +792,8 @@ void d3d8_shaders_prepare_draw(DWORD fvf)
             memcpy(cb->wvp, identity, sizeof(identity));
             memcpy(cb->world, identity, sizeof(identity));
             memcpy(cb->world_inv_transpose, identity, sizeof(identity));
-            cb->screen_w = (float)d3d8_GetBackbufferWidth();
-            cb->screen_h = (float)d3d8_GetBackbufferHeight();
+            cb->screen_w = (float)d3d8_GetViewportWidth();
+            cb->screen_h = (float)d3d8_GetViewportHeight();
             cb->flags = 0x01; /* pre-transformed */
         } else {
             float wv[16], wvp[16], wvp_t[16], world_t[16];
@@ -929,6 +953,7 @@ void d3d8_shaders_prepare_draw(DWORD fvf)
         if (rs && rs[D3DRS_SPECULARENABLE])
             pc->ps_flags |= 4;
         pc->ps_flags |= (g_texel_coord_mask & 15u) << 3;
+        pc->ps_flags |= (g_texture_alpha_one_mask & 15u) << 7;
 
         /* Per-stage texture state */
         for (stage = 0; stage < 4; stage++) {

@@ -16,6 +16,15 @@ for offset in ("", " + 4", " + 8", " + 0xC"):
 assert "PUSH32(esp, 0x001A7938u); sub_001A7FF0();" in source
 assert "0x001A7933u" not in source
 starts = {entry["start"] for entry in seeds}
-assert {"0x001A7E30", "0x001A7EB0"} <= starts
+assert {"0x001A7E30", "0x001A7EB0", "0x002830F0", "0x00283AF0"} <= starts
+assert source.count("void sub_002830F0(void)") == 1
+assert "if (xbox_va == 0x002830F0) return sub_002830F0;" in source
+assert "loc_00283123: ;" in source
+assert "loc_00283211: ;" in source
+assert "PUSH32(esp, 0x0028314Cu); sub_002844F0();" in source
+assert "PUSH32(esp, 0x0028320Fu); sub_00204DE0();" in source
+assert source.count("void sub_00283AF0(void)") == 1
+assert "if (xbox_va == 0x00283AF0) return sub_00283AF0;" in source
+assert "PUSH32(esp, 0x00283B28u); sub_00204DE0();" in source
 
-print("PASS: retail title-surface callbacks and title-ready ABI are persistent")
+print("PASS: retail title callbacks, title-ready ABI, and complete movie shutdown are persistent")

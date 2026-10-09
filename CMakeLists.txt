@@ -55,6 +55,7 @@ set(GAME_SOURCES
     src/dah2_resources.rc
     src/guest_nv2a_bridge.c
     src/parity_timing.c
+    src/parity_state.c
     src/recomp_manual.c
     src/trace_control.c
     # Add game-specific sources here, e.g.:

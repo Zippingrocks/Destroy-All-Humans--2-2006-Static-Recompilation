@@ -12,6 +12,12 @@ void dah2_guest_gpu_commit(uint32_t guest_device, uint32_t published_put);
 /* Flush translated work and present one frame on the boot window. */
 void dah2_guest_gpu_present(uint32_t guest_device);
 
+/* True when DAH2_TEST_WINDOW_HIDDEN is set. The environment is read once and
+   cached: generated code calls this from inner decode loops, where a
+   getenv() per iteration (a scan of the whole environment block) cost about
+   a quarter of the frame thread's time during movie playback. */
+int dah2_test_window_hidden(void);
+
 /*
  * Record the push buffer's true base address (the guest_device+0 "put"
  * value observed at the earliest possible moment, right after the guest's

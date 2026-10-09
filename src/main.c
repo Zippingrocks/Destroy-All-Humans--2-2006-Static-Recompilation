@@ -218,6 +218,7 @@ static DWORD WINAPI hang_watchdog_thread(LPVOID unused)
  * guest starts with every register at zero and faults immediately, having
  * apparently ignored the setup that visibly ran. */
 extern RECOMP_TLS uint32_t g_eax, g_ecx, g_edx, g_esp;
+extern volatile uint32_t g_dah2_resolver_probe[24];
 extern RECOMP_TLS uint32_t g_ebx, g_esi, g_edi;
 extern RECOMP_TLS uint32_t g_seh_ebp;
 /* x87 and SSE state. Global for the same reason the volatile GPRs are: one
@@ -304,16 +305,29 @@ static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
      * it here), looking exactly like a silent hang from the outside. Log
      * every exception code first so a future one is never invisible again,
      * then fall through to the existing access-violation-specific handling. */
-    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) {
-        fprintf(stderr, "[EXCEPTION] code=0x%08X RIP=0x%llX flags=0x%08X\n",
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION &&
+        ep->ExceptionRecord->ExceptionCode != 0xE06D7363u) {
+        fprintf(stdout, "[EXCEPTION] code=0x%08X RIP=0x%llX flags=0x%08X\n",
             (unsigned)ep->ExceptionRecord->ExceptionCode,
             (unsigned long long)ep->ContextRecord->Rip,
             (unsigned)ep->ExceptionRecord->ExceptionFlags);
-        fprintf(stderr, "  Xbox regs: eax=0x%08X ecx=0x%08X edx=0x%08X esp=0x%08X\n",
+        fprintf(stdout, "  Xbox regs: eax=0x%08X ecx=0x%08X edx=0x%08X esp=0x%08X\n",
             g_eax, g_ecx, g_edx, g_esp);
-        fprintf(stderr, "  Xbox regs: ebx=0x%08X esi=0x%08X edi=0x%08X\n",
+        fprintf(stdout, "  Xbox regs: ebx=0x%08X esi=0x%08X edi=0x%08X\n",
             g_ebx, g_esi, g_edi);
-        fflush(stderr);
+        {
+            void *frames[24];
+            USHORT count = CaptureStackBackTrace(0, 24, frames, NULL);
+            uintptr_t base = (uintptr_t)GetModuleHandleA(NULL);
+            fprintf(stdout, "  Fault RVA=%llX\n", (unsigned long long)(ep->ContextRecord->Rip - base));
+            for (USHORT frame = 0; frame < count; ++frame) {
+                uintptr_t address = (uintptr_t)frames[frame];
+                if (address >= base && address < base + 0x10000000ULL)
+                    fprintf(stdout, "  [EXCEPTION-FRAME] %u RVA=%llX\n", frame,
+                            (unsigned long long)(address - base));
+            }
+        }
+        fflush(stdout);
     }
     if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
         uintptr_t fault_addr = ep->ExceptionRecord->ExceptionInformation[1];
@@ -342,6 +356,11 @@ static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
             g_ebx, g_esi, g_edi);
         fprintf(stdout, "  Xbox VA of fault: 0x%08X\n",
             (uint32_t)(fault_addr - (uintptr_t)g_xbox_mem_offset));
+        for (unsigned i = 0; i < 4; ++i) {
+            volatile uint32_t *p = &g_dah2_resolver_probe[i * 6];
+            fprintf(stdout, "  [118DE0-STAGE%u] ecx=%08X ebx=%08X esi=%08X edi=%08X esp=%08X eax=%08X\n",
+                i, p[0], p[1], p[2], p[3], p[4], p[5]);
+        }
 
         /*
          * TODO: Add game-specific diagnostics here. Examples:

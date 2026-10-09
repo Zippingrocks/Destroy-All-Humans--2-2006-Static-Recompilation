@@ -1,0 +1,3 @@
+# Two one-poll Start pulses: leave the first attract segment, then skip the startup movie to title.
+300 1 0010 0 0 0 0 0 0
+900 1 0010 0 0 0 0 0 0
