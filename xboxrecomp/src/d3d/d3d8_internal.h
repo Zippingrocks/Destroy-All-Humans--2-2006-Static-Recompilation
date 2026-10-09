@@ -137,6 +137,8 @@ void    d3d8_shaders_shutdown(void);
 void    d3d8_shaders_prepare_draw(DWORD fvf);
 void    d3d8_shaders_set_texel_coord_mask(UINT mask);
 void    d3d8_shaders_set_texture_alpha_one_mask(UINT mask);
+void    d3d8_shaders_set_fog_from_specular(int enable); /* pretransformed vertices carry the NV2A fog factor in the specular alpha */
+int     d3d8_shaders_get_fog_from_specular(void);
 
 /* ================================================================
  * NV2A Register Combiner pixel shaders (d3d8_combiners.c)

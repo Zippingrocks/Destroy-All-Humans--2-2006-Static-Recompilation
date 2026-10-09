@@ -408,6 +408,7 @@ static ID3D11Buffer        *g_vs_light_cb = NULL; /* VS lighting CB (b1) */
 static ID3D11Buffer        *g_ps_cb = NULL;       /* PS constant buffer */
 static UINT                 g_texel_coord_mask;
 static UINT                 g_texture_alpha_one_mask;
+static int                  g_fog_from_specular;
 
 /* VS transform constant buffer layout (must match HLSL TransformCB) */
 typedef struct {
@@ -750,6 +751,16 @@ void d3d8_shaders_shutdown(void)
 void d3d8_shaders_set_texel_coord_mask(UINT mask)
 {
     g_texel_coord_mask = mask & 15u;
+}
+
+void d3d8_shaders_set_fog_from_specular(int enable)
+{
+    g_fog_from_specular = enable ? 1 : 0;
+}
+
+int d3d8_shaders_get_fog_from_specular(void)
+{
+    return g_fog_from_specular;
 }
 
 void d3d8_shaders_set_texture_alpha_one_mask(UINT mask)

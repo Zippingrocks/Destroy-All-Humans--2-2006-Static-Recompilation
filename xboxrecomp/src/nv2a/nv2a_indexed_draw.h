@@ -168,7 +168,8 @@ static int pgraph_dah2_scene_texture_format(unsigned stage) {
         PG_REG(NV097_SET_TEXTURE_CONTROL0+d)==0x4003FFC0u;
 }
 static int pgraph_dah2_final_combiner(void) {
-    return PG_REG(NV097_SET_COMBINER_SPECULAR_FOG_CW0)==0xEu &&
+    /* 0x130E0300: spare0 blended toward the fog register (A=fog.a, B=spare0, C=fog.rgb) -- the fog variant of the plain 0xE. */
+    return (PG_REG(NV097_SET_COMBINER_SPECULAR_FOG_CW0)==0xEu || PG_REG(NV097_SET_COMBINER_SPECULAR_FOG_CW0)==0x130E0300u) &&
         PG_REG(NV097_SET_COMBINER_SPECULAR_FOG_CW1)==0x1C80u;
 }
 static int pgraph_dah2_scene_lit2(void) {
@@ -340,7 +341,7 @@ static uint32_t pgraph_supported_array_state(unsigned profile) {
         {NV097_SET_TRANSFORM_EXECUTION_MODE,6}, {NV097_SET_TRANSFORM_PROGRAM_CXT_WRITE_EN,0},
         {NV097_SET_CONTEXT_DMA_A,3}, {NV097_SET_CONTEXT_DMA_VERTEX_A,3},
         {NV097_SET_CONTEXT_DMA_VERTEX_B,3},
-        {NV097_SET_FOG_ENABLE,0}, {NV097_SET_STENCIL_TEST_ENABLE,0},
+        {NV097_SET_STENCIL_TEST_ENABLE,0},
         {NV097_SET_POLY_OFFSET_FILL_ENABLE,0}, {NV097_SET_SHADE_MODE,0x1D01},
         {NV097_SET_FRONT_POLYGON_MODE,0x1B02}, {NV097_SET_BACK_POLYGON_MODE,0x1B02},
         {NV097_SET_CLIP_MIN,0},
@@ -355,6 +356,11 @@ static uint32_t pgraph_supported_array_state(unsigned profile) {
     { uint32_t equation=PG_REG(NV097_SET_BLEND_EQUATION);
       if(equation!=0x8006 && equation!=0x8007 && equation!=0x8008 && equation!=0x800A && equation!=0x800B)
           return NV097_SET_BLEND_EQUATION; }
+    if (PG_REG(NV097_SET_FOG_ENABLE)>1 || (PG_REG(NV097_SET_FOG_ENABLE) &&
+        PG_REG(NV097_SET_FOG_MODE)!=NV097_SET_FOG_MODE_V_LINEAR && PG_REG(NV097_SET_FOG_MODE)!=NV097_SET_FOG_MODE_V_LINEAR_ABS &&
+        PG_REG(NV097_SET_FOG_MODE)!=NV097_SET_FOG_MODE_V_EXP && PG_REG(NV097_SET_FOG_MODE)!=NV097_SET_FOG_MODE_V_EXP2 &&
+        PG_REG(NV097_SET_FOG_MODE)!=NV097_SET_FOG_MODE_V_EXP_ABS && PG_REG(NV097_SET_FOG_MODE)!=NV097_SET_FOG_MODE_V_EXP2_ABS))
+        return NV097_SET_FOG_MODE;
     if (!profile) return NV097_SET_COMBINER_CONTROL;
     if (profile!=PGRAPH_ARRAY_PROFILE_DAH2_ACCUMULATE4_XRGB)
         for (unsigned stage=((profile==PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT2 ||
@@ -418,8 +424,9 @@ static int pgraph_read_vertex(uint32_t index,unsigned attributes,NV2AVertexResul
             if (!(attributes&(1u<<a))) continue;
             uint32_t format=PG_REG(NV097_SET_VERTEX_DATA_ARRAY_FORMAT+a*4);failure[1]=a;failure[2]=format;
             unsigned count=(format>>4)&15,type=format&15,stride=(format>>8)&255;
-            unsigned bytes=type==2 ? count*4 : type==1 ? count*2 : 4;
-            if (!count || count>4 || (type!=2 && type!=1 && !(type==0 && count==4))) { failure[5]=1;return 0; }
+            if (type==6) count=3;
+            unsigned bytes=type==2 ? count*4 : (type==1 || type==5) ? count*2 : type==4 ? count : 4;
+            if (!count || count>4 || (type!=2 && type!=1 && type!=4 && type!=5 && type!=6 && !(type==0 && count==4))) { failure[5]=1;return 0; }
             uint32_t base=PG_REG(NV097_SET_VERTEX_DATA_ARRAY_OFFSET+a*4)&0x7FFFFFFF;
             uint64_t address=(uint64_t)base+(uint64_t)index*stride;
             failure[3]=(uint32_t)address;failure[4]=(stride<<16)|bytes;
@@ -455,7 +462,28 @@ static int pgraph_read_vertex(uint32_t index,unsigned attributes,NV2AVertexResul
 
 typedef struct {
     float x,y,z,rhw;uint32_t diffuse,specular;float u0,v0,u1,v1;
-} PgraphSceneVertex;
+} PgraphSceneVertex; /* specular.a carries the NV2A fog factor (oFog through the fog mode; 255 = unfogged) */
+
+/* Fog factor from the vertex program's oFog.x, after xemu's glsl/vsh.c: the programmable pipeline feeds oFog.x through the
+ * fog mode and FOG_PARAMS; the pixel side clamps it to 0..1 and uses it as the FOG register alpha of the final combiner. */
+static float pgraph_fog_factor(float coord) {
+    if(!PG_REG(NV097_SET_FOG_ENABLE)) return 1.0f;
+    float p0=u2f(PG_REG(NV097_SET_FOG_PARAMS)),p1=u2f(PG_REG(NV097_SET_FOG_PARAMS+4));
+    float f;
+    switch(PG_REG(NV097_SET_FOG_MODE)) {
+    case NV097_SET_FOG_MODE_V_LINEAR: case NV097_SET_FOG_MODE_V_LINEAR_ABS:
+        f=p0+coord*p1-1.0f;break;
+    case NV097_SET_FOG_MODE_V_EXP: case NV097_SET_FOG_MODE_V_EXP_ABS:
+        f=p0+exp2f(coord*p1*16.0f)-1.5f;break;
+    case NV097_SET_FOG_MODE_V_EXP2: case NV097_SET_FOG_MODE_V_EXP2_ABS:
+        f=p0+exp2f(-coord*coord*p1*p1*32.0f)-1.5f;break;
+    default: f=1.0f;
+    }
+    uint32_t m=PG_REG(NV097_SET_FOG_MODE);
+    if(m==NV097_SET_FOG_MODE_V_LINEAR_ABS || m==NV097_SET_FOG_MODE_V_EXP_ABS || m==NV097_SET_FOG_MODE_V_EXP2_ABS) f=fabsf(f);
+    if(!(f==f)) f=1.0f;
+    return fminf(1.0f,fmaxf(0.0f,f));
+}
 
 static int pgraph_pack_scene_vertex(const NV2AVertexResult *r,PgraphSceneVertex *v) {
     if(r->written_mask[0]!=15 || r->written_mask[3]!=15) return 0;
@@ -481,7 +509,14 @@ static int pgraph_pack_scene_vertex(const NV2AVertexResult *r,PgraphSceneVertex 
         float component=isnan(r->output[3][c]) ? 1.0f : r->output[3][c];
         color[c]=(uint32_t)floorf(fminf(1,fmaxf(0,component))*255.0f+0.5f);
     }
-    v->diffuse=(color[3]<<24)|(color[0]<<16)|(color[1]<<8)|color[2];v->specular=0;
+    v->diffuse=(color[3]<<24)|(color[0]<<16)|(color[1]<<8)|color[2];
+    { uint32_t spec[3]={0,0,0};
+      if(r->written_mask[4]) for(unsigned c=0;c<3;c++) {
+          float component=isfinite(r->output[4][c]) ? r->output[4][c] : 0.0f;
+          spec[c]=(uint32_t)floorf(fminf(1,fmaxf(0,component))*255.0f+0.5f);
+      }
+      float fog=(r->written_mask[5]&8) && isfinite(r->output[5][0]) ? pgraph_fog_factor(r->output[5][0]) : 1.0f;
+      v->specular=((uint32_t)floorf(fog*255.0f+0.5f)<<24)|(spec[0]<<16)|(spec[1]<<8)|spec[2]; }
     v->u0=(r->written_mask[9]&8) && isfinite(r->output[9][0]) ? r->output[9][0] : 0;
     v->v0=(r->written_mask[9]&4) && isfinite(r->output[9][1]) ? r->output[9][1] : 0;
     v->u1=(r->written_mask[10]&8) && isfinite(r->output[10][0]) ? r->output[10][0] : 0;
@@ -1040,7 +1075,7 @@ static int pgraph_upload_scene_texture(IDirect3DDevice8 *dev,unsigned stage,
 static int pgraph_instruction_uses_source(const NV2AVPInstruction *inst,unsigned source) {
     unsigned mac=inst->mac;
     if(source==0) return mac!=0;
-    if(source==1) return mac==2 || mac==5 || mac==6 || mac==7 || (mac>=9 && mac<=12);
+    if(source==1) return mac==2 || mac==5 || mac==6 || mac==7 || mac==8 || (mac>=9 && mac<=12);
     return mac==3 || mac==4 || inst->ilu!=0;
 }
 
@@ -1480,6 +1515,8 @@ static void submit_indexed_draw(void) {
             (profile==PGRAPH_ARRAY_PROFILE_DAH2_ACCUMULATE4_XRGB ? D3DFVF_TEX4 : D3DFVF_TEX1)));
     }
     PG_RS(D3DRS_LIGHTING,FALSE);PG_RS(D3DRS_FOGENABLE,FALSE);PG_RS(D3DRS_SPECULARENABLE,FALSE);
+    { uint32_t fc=PG_REG(NV097_SET_FOG_COLOR); /* NV097: R=0xFF G=0xFF00 B=0xFF0000 A=0xFF000000 -> D3DCOLOR ARGB */
+      PG_RS(D3DRS_FOGCOLOR,(fc&0xFF000000u)|((fc&0xFFu)<<16)|(fc&0xFF00u)|((fc>>16)&0xFFu)); }
     PG_RS(D3DRS_FILLMODE,D3DFILL_SOLID);PG_RS(D3DRS_SHADEMODE,2 /* D3DSHADE_GOURAUD */);
     PG_RS(D3DRS_ZENABLE,scene_no_depth_diag ? FALSE : g_pg.depth_test);
     PG_RS(D3DRS_ZWRITEENABLE,scene_no_depth_diag ? FALSE : PG_REG(NV097_SET_DEPTH_MASK)!=0);
@@ -1593,6 +1630,7 @@ static void submit_indexed_draw(void) {
     }    pgraph_draw_surface_probe_before(profile);
     PG_CALL(dev->lpVtbl->BeginScene(dev));
     d3d8_shaders_set_texel_coord_mask(texel_coord_mask);
+    d3d8_shaders_set_fog_from_specular(profile>=PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT2);
     { unsigned alpha_one_mask=0;
       for(unsigned s=0;s<4;s++) {
           unsigned d=s*0x40;
@@ -1621,6 +1659,7 @@ static void submit_indexed_draw(void) {
         fflush(stdout);
     }
     d3d8_shaders_set_texel_coord_mask(0);
+    d3d8_shaders_set_fog_from_specular(0);
     d3d8_shaders_set_texture_alpha_one_mask(0);
     PG_CALL(draw_result);PG_CALL(end_result);
     pgraph_record_profile_result(profile,g_pg.index_source,primitives,0);

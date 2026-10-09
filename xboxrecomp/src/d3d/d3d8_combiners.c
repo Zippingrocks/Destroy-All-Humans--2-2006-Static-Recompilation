@@ -528,6 +528,8 @@ int d3d8_combiners_generate_hlsl(const NV2ACombinerState *state,
     EMIT("    uint   alpha_func;\n");
     EMIT("    uint   alpha_test_enable;\n");
     EMIT("    uint   fog_enable;\n");
+    EMIT("    uint   fog_from_specular;\n");
+    EMIT("    uint3  cb_pad;\n");
     EMIT("};\n\n");
 
     /* ---- Input structure ---- */
@@ -549,12 +551,13 @@ int d3d8_combiners_generate_hlsl(const NV2ACombinerState *state,
     EMIT("    float4 r_zero = float4(0, 0, 0, 0);\n");
     EMIT("    float4 r_c0   = c0[0];\n");
     EMIT("    float4 r_c1   = c1[0];\n");
-    EMIT("    float4 r_fog  = fog_color;\n");
+    /* FOG register: RGB = fog colour, A = the interpolated per-vertex fog factor (1 = unfogged). */
+    EMIT("    float4 r_fog  = fog_from_specular ? float4(fog_color.rgb, saturate(input.color1.a)) : fog_color;\n");
 
     /* Vertex colors: Xbox D3DCOLOR is BGRA in memory, the vertex shader
      * should have already swizzled to RGBA. */
     EMIT("    float4 r_v0   = input.color0;\n");
-    EMIT("    float4 r_v1   = input.color1;\n");
+    EMIT("    float4 r_v1   = fog_from_specular ? float4(input.color1.rgb, 1.0) : input.color1;\n");
 
     /* Texture samples */
     for (i = 0; i < NV2A_MAX_TEXTURES; i++) {
@@ -1056,6 +1059,7 @@ BOOL d3d8_combiners_prepare_draw(void)
         cb->alpha_func = rs[D3DRS_ALPHAFUNC];
         cb->alpha_test_enable = rs[D3DRS_ALPHATESTENABLE] ? 1 : 0;
         cb->fog_enable = rs[D3DRS_FOGENABLE] ? 1 : 0;
+        cb->fog_from_specular = (UINT)d3d8_shaders_get_fog_from_specular();
 
         ID3D11DeviceContext_Unmap(ctx, (ID3D11Resource *)g_combiner_cb, 0);
     }

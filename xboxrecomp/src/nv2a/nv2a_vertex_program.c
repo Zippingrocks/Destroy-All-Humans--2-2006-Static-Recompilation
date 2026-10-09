@@ -51,7 +51,7 @@ void nv2a_vp_decode_instruction(const uint32_t w[4], NV2AVPInstruction *d) {
 static unsigned mac_sources(unsigned mac) {
     switch (mac) {
     case 1: case 13: return 1; /* MOV/ARL: A */
-    case 2: case 5: case 6: case 7: case 9: case 10: case 11: case 12: return 3; /* A,B */
+    case 2: case 5: case 6: case 7: case 8: case 9: case 10: case 11: case 12: return 3; /* A,B */
     case 3: return 5; /* A,C */
     case 4: return 7; /* A,B,C */
     default: return 0;
@@ -66,7 +66,7 @@ static int source_valid(const NV2AVPInstruction *d, unsigned index) {
 
 static NV2AVPStatus supported(const NV2AVPInstruction *d) {
     unsigned used=mac_sources(d->mac);
-    if (d->reserved_word || d->mac>13 || d->mac==8 || d->ilu>7)
+    if (d->reserved_word || d->mac>13 || d->ilu>7)
         return NV2A_VP_UNSUPPORTED_OPCODE;
     if ((!d->mac && d->mac_mask) || (!d->ilu && d->ilu_mask))
         return NV2A_VP_INVALID_DESTINATION;
@@ -178,6 +178,7 @@ static void mac_value(unsigned op,const float a[4],const float b[4],const float 
     case 5: scalar=nv_mul(a[0],b[0])+nv_mul(a[1],b[1])+nv_mul(a[2],b[2]); for(unsigned i=0;i<4;i++)out[i]=scalar; break;
     case 6: scalar=nv_mul(a[0],b[0])+nv_mul(a[1],b[1])+nv_mul(a[2],b[2])+b[3]; for(unsigned i=0;i<4;i++)out[i]=scalar; break;
     case 7: scalar=nv_mul(a[0],b[0])+nv_mul(a[1],b[1])+nv_mul(a[2],b[2])+nv_mul(a[3],b[3]); for(unsigned i=0;i<4;i++)out[i]=scalar; break;
+    case 8: out[0]=1.0f;out[1]=nv_mul(a[1],b[1]);out[2]=a[2];out[3]=b[3]; break; /* DST */
     case 9: for(unsigned i=0;i<4;i++)out[i]=fminf(a[i],b[i]); break;
     case 10: for(unsigned i=0;i<4;i++)out[i]=fmaxf(a[i],b[i]); break;
     case 11: for(unsigned i=0;i<4;i++)out[i]=a[i]<b[i]?1.0f:0.0f; break;
@@ -264,15 +265,32 @@ NV2AVPStatus nv2a_vp_execute_prepared(const NV2AVPPreparedProgram *prepared,
     *out=result;return NV2A_VP_OK;
 }
 
+static float sext_norm(uint32_t raw,unsigned bits,float scale) {
+    uint32_t sign=1u<<(bits-1);
+    int32_t v=(int32_t)(raw&((1u<<bits)-1u));
+    if(raw&sign) v-=(int32_t)(1u<<bits);
+    float f=(float)v/scale;
+    return f<-1.0f?-1.0f:f;
+}
+
+/* Vertex-array element types (NV097_SET_VERTEX_DATA_ARRAY_FORMAT_TYPE): 0 UB_D3D (BGRA bytes, normalized), 1 S1 (shorts, normalized),
+ * 2 F, 4 UB_OGL (RGBA bytes, normalized), 5 S32K (shorts, raw), 6 CMP (11:11:10 packed, normalized).  Missing components default to
+ * (0,0,0,1) like the hardware's current-value registers. */
 NV2AVPStatus nv2a_vp_decode_attribute(uint32_t format, const void *bytes,
     size_t byte_count, float out[4]) {
     unsigned type=format&15,count=(format>>4)&15;float value[4]={0,0,0,1};
     if(!bytes||!out)return NV2A_VP_INVALID_ARGUMENT;
-    if(!count||count>4||(type!=2&&type!=1&&!(type==0&&count==4)))return NV2A_VP_UNSUPPORTED_FORMAT;
-    size_t needed=type==2?count*4:type==1?count*2:4;if(byte_count<needed)return NV2A_VP_INVALID_ARGUMENT;
+    if(type==6) count=3;
+    if(!count||count>4||!(type==0||type==1||type==2||type==4||type==5||type==6))return NV2A_VP_UNSUPPORTED_FORMAT;
+    if(type==0&&count!=4)return NV2A_VP_UNSUPPORTED_FORMAT;
+    size_t needed=type==2?count*4:(type==1||type==5)?count*2:type==4?count:4;if(byte_count<needed)return NV2A_VP_INVALID_ARGUMENT;
     const uint8_t *p=(const uint8_t *)bytes;
     if(type==2)for(unsigned c=0;c<count;c++){uint32_t bits=(uint32_t)p[c*4]|((uint32_t)p[c*4+1]<<8)|((uint32_t)p[c*4+2]<<16)|((uint32_t)p[c*4+3]<<24);memcpy(&value[c],&bits,4);}
     else if(type==1)for(unsigned c=0;c<count;c++){int16_t raw=(int16_t)((uint16_t)p[c*2]|((uint16_t)p[c*2+1]<<8));value[c]=raw==-32768?-1.0f:(float)raw/32767.0f;}
+    else if(type==5)for(unsigned c=0;c<count;c++){int16_t raw=(int16_t)((uint16_t)p[c*2]|((uint16_t)p[c*2+1]<<8));value[c]=(float)raw;}
+    else if(type==4)for(unsigned c=0;c<count;c++)value[c]=p[c]/255.0f;
+    else if(type==6){uint32_t v=(uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24);
+        value[0]=sext_norm(v,11,1023.0f);value[1]=sext_norm(v>>11,11,1023.0f);value[2]=sext_norm(v>>22,10,511.0f);}
     else{value[0]=p[2]/255.0f;value[1]=p[1]/255.0f;value[2]=p[0]/255.0f;value[3]=p[3]/255.0f;}
     memcpy(out,value,sizeof(value));return NV2A_VP_OK;
 }

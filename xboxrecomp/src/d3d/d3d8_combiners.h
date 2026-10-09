@@ -248,6 +248,8 @@ typedef struct NV2APSConstants {
     UINT  alpha_func;                       /* D3DCMPFUNC enum value */
     UINT  alpha_test_enable;                /* 0 or 1 */
     UINT  fog_enable;                       /* 0 or 1 */
+    UINT  fog_from_specular;                /* 1: FOG register alpha = interpolated specular alpha (NV2A pretransformed scene draws) */
+    UINT  pad[3];
 } NV2APSConstants;
 
 /* ================================================================

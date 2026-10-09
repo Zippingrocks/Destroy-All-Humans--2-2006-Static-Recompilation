@@ -1,0 +1,1 @@
+# Truly idle: no pad events at all.  The title scene ("Press START" plus attract cycle) must hold without input.
