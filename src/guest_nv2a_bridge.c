@@ -135,6 +135,26 @@ static int dah2_guest_span_valid(uint32_t address, uint32_t size)
     return 1;
 }
 
+/* NV097_GET_REPORT: the GPU writes {timestamp u64, value u32, done u32} into a 16-byte report record.  D3D's visibility-test
+ * reader (GetVisibilityTestResult, 0x002504C0) spins until the CPU-visible record changes from the -1 D3D stored there; with no
+ * hardware behind the push buffer nothing ever answered, so the game stalled forever in 0x16E6F7.  This D3D passes the record's
+ * physical address (bits 0..26) as the parameter (0x07A88000 -> block base 0x87A88000 in device+0x7D4), so the record VA is
+ * 0x80000000|phys.  Translation is synchronous: the report is complete the moment the method is consumed.  The ZPASS pixel
+ * count is not measured: every test reports "visible". */
+static void dah2_gpu_report(uint32_t guest_device, uint32_t param)
+{
+    uint32_t record = 0x80000000u | (param & 0x07FFFFFFu);
+    LARGE_INTEGER now;
+    (void)guest_device;
+    if (!dah2_guest_span_valid(record, 16u))
+        return;
+    QueryPerformanceCounter(&now);
+    MEM32(record + 0u) = (uint32_t)now.QuadPart;
+    MEM32(record + 4u) = (uint32_t)((uint64_t)now.QuadPart >> 32);
+    MEM32(record + 8u) = 0x1000u;
+    MEM32(record + 12u) = 0u;
+}
+
 static int dah2_read_guest_ring(uint32_t guest_device,
                                 uint32_t *out_cpu_start,
                                 uint32_t *out_cpu_end,
@@ -485,6 +505,8 @@ static void dah2_guest_gpu_commit_locked(uint32_t guest_device,
                 pgraph_d3d11_method((int)subchannel,
                                     method + (incrementing ? i * 4u : 0u),
                                     param);
+                if ((method + (incrementing ? i * 4u : 0u)) == 0x17D0u)
+                    dah2_gpu_report(guest_device, param);
                 commit_methods++;
             }
             continue;
@@ -691,6 +713,20 @@ void dah2_guest_gpu_present(uint32_t guest_device)
     g_dah2_present_timing_total = (uint64_t)(finished - entry);
     s_last_exit = finished;
     g_dah2_present_timing_samples++;
+#ifdef DAH2_FN_TRACE
+    {
+        /* Diagnostic function-entry tracing (src/dah2_fn_trace.h): stamp the
+         * present number and switch tracing on at DAH2_FNT_AT_PRESENT. */
+        extern volatile uint32_t g_fnt_on, g_fnt_stamp;
+        static uint32_t s_fnt_at = 0xFFFFFFFFu;
+        if (s_fnt_at == 0xFFFFFFFFu) {
+            const char *e = getenv("DAH2_FNT_AT_PRESENT");
+            s_fnt_at = e ? (uint32_t)strtoul(e, NULL, 10) : 0u;
+        }
+        g_fnt_stamp = (uint32_t)g_dah2_present_timing_samples;
+        if (s_fnt_at && g_fnt_stamp >= s_fnt_at) g_fnt_on = 1;
+    }
+#endif
     if (getenv("DAH2_TIMING_TRACE") &&
         (g_dah2_present_timing_samples <= 8 ||
          (g_dah2_present_timing_samples % 120u) == 0)) {

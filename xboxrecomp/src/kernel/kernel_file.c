@@ -218,6 +218,20 @@ NTSTATUS __stdcall xbox_NtReadFile(
         result = ReadFile(FileHandle, Buffer, Length, &bytes_read, NULL);
     }
 
+    {   /* DAH2_FILE_OPEN_DIAGNOSTIC: also trace every read so a failed streaming load is visible */
+        static int enabled = -1;
+        if (enabled < 0) { const char *v = getenv("DAH2_FILE_OPEN_DIAGNOSTIC"); enabled = v && v[0] && strcmp(v, "0") != 0; }
+        if (enabled) {
+            DWORD err = result ? 0 : GetLastError();
+            FILE *tf = _wfopen(L"dah2_file_open_trace.log", L"a, ccs=UTF-8");
+            if (tf) {
+                fwprintf(tf, L"READ\thandle=%p\tlen=0x%lX\toff=%lld\tok=%d\tbytes=0x%lX\terr=%lu\n", FileHandle,
+                         (unsigned long)Length, ByteOffset ? (long long)ByteOffset->QuadPart : -1LL, (int)result,
+                         (unsigned long)bytes_read, (unsigned long)err);
+                fclose(tf);
+            }
+        }
+    }
     if (result || GetLastError() == ERROR_HANDLE_EOF) {
         fprintf(stderr, "  [FILE] NtReadFile result=%d bytes=0x%lX err=%lu\n",
                 result, (unsigned long)bytes_read, (unsigned long)GetLastError());

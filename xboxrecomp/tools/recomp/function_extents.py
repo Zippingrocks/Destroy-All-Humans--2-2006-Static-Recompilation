@@ -91,7 +91,10 @@ def apply_function_extents(image, func_db, manifest_path):
         instructions = list(disassembler.disasm(raw, start))
         if (len(instructions) != count or sum(i.size for i in instructions) != length
                 or instructions[-1].address + instructions[-1].size != end
-                or instructions[-1].mnemonic != "ret"):
+                or not (instructions[-1].mnemonic in ("ret", "jmp")
+                        # a trailing call to a no-return helper (assert/throw), followed by int3 alignment padding
+                        or (instructions[-1].mnemonic == "call" and offset + length < len(image)
+                            and image[offset + length] == 0xCC))):
             raise ValueError(f"function extents: instruction/return boundary mismatch at 0x{start:08X}")
         pending[start] = {"end": end, "size": length, "num_instructions": count}
     for start, fields in pending.items():

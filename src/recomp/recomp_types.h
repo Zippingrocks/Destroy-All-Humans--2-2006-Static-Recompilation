@@ -348,6 +348,20 @@ static inline void XMM_STORE(uint32_t addr, RecompXmm v) {
 #define XMM_STORE_LOW(addr, src)  recomp_xmm_store_half((addr), (src), 0)
 #define XMM_STORE_HIGH(addr, src) recomp_xmm_store_half((addr), (src), 1)
 
+/* 64-bit MMX integer helpers (mm0..mm7 are uint64_t locals of the lifted function) */
+#include "recomp_mmx.h"
+static inline int32_t recomp_cvt_f2i(float f, int truncate) {
+    if (f != f || f >= 2147483648.0f || f < -2147483648.0f) return (int32_t)0x80000000u;   /* integer indefinite */
+    return truncate ? (int32_t)f : (int32_t)nearbyintf(f);
+}
+/** cvtpi2ps: two int32 -> lanes 0..1, upper lanes unchanged. */
+static inline RecompXmm XMM_CVTPI2PS(RecompXmm d, uint64_t s) { recomp_mm_t m; m.q = s; d.f[0] = (float)m.sd[0]; d.f[1] = (float)m.sd[1]; return d; }
+/** cvtps2pi / cvttps2pi: two floats -> two int32 (round-to-nearest-even / truncate). */
+static inline uint64_t MMX_CVTPS2PI(float f0, float f1, int truncate) { recomp_mm_t r; r.sd[0] = recomp_cvt_f2i(f0, truncate); r.sd[1] = recomp_cvt_f2i(f1, truncate); return r.q; }
+/** rdtsc: 733.33 MHz Xbox time-stamp counter derived from the host performance counter. */
+extern uint64_t recomp_rdtsc(void);
+
+
 static inline void recomp_xmm_load_half(RecompXmm *dst, uint32_t addr,
                                         int high) {
     dst->u[high * 2]     = MEM32(addr);
@@ -685,11 +699,30 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va);
  * own push/pop already leaves these registers unchanged) and only changes
  * behavior for callees that were violating the calling convention anyway.
  */
+#ifdef DAH2_FN_TRACE
+extern void dah2_icall_bad(uint32_t va, uint32_t ecx, uint32_t edx, uint32_t eax, uint32_t esp, uint32_t line, const char *file);
+#define DAH2_ICALL_BAD_HOOK(va) do { if (((va) >= 0x00400000u && (va) < 0xFE000000u) || ((va) >= 0x0021A000u && (va) < 0x00226000u)) dah2_icall_bad((va), g_ecx, g_edx, g_eax, g_esp, (uint32_t)__LINE__, __FILE__); } while (0)
+#else
+#define DAH2_ICALL_BAD_HOOK(va) ((void)0)
+#endif
+#ifdef DAH2_FN_TRACE
+extern void dah2_itail_fail(uint32_t va, uint32_t ecx, uint32_t edx, uint32_t eax, uint32_t esp, uint32_t line, const char *file);
+#define DAH2_ITAIL_FAIL_HOOK(va) dah2_itail_fail((va), g_ecx, g_edx, g_eax, g_esp, (uint32_t)__LINE__, __FILE__)
+#else
+#define DAH2_ITAIL_FAIL_HOOK(va) ((void)0)
+#endif
+#ifdef DAH2_FN_TRACE
+extern void dah2_icall_seen(uint32_t va, uint32_t esp, uint32_t ecx, uint32_t line);
+#define DAH2_ICALL_SEEN_HOOK(va) dah2_icall_seen((va), g_esp, g_ecx, (uint32_t)__LINE__)
+#else
+#define DAH2_ICALL_SEEN_HOOK(va) ((void)0)
+#endif
 #define RECOMP_ICALL(xbox_va) do { \
     uint32_t _va = (uint32_t)(xbox_va); \
     g_icall_trace[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = _va; \
     g_icall_trace_idx++; \
     g_icall_count++; \
+    DAH2_ICALL_BAD_HOOK(_va); \
     /* Skip garbage VAs outside code section + kernel thunk range */ \
     if (_va >= 0x00400000 && _va < 0xFE000000) { \
         g_esp += 4; eax = 0; break; \
@@ -702,7 +735,7 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va);
         RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); _fn(); \
         g_ebx = _pe; g_esi = _ps; g_edi = _pd; \
     } \
-    else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); \
+    else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); DAH2_ITAIL_FAIL_HOOK(_va); \
            recomp_icall_fail_log(_va); g_esp += 4; eax = 0; } \
 } while(0)
 
@@ -728,6 +761,8 @@ void recomp_icall_watch_log(uint32_t this_ptr, uint32_t target, uint32_t va_from
     g_icall_trace[g_icall_trace_idx & (ICALL_TRACE_SIZE-1)] = _va; \
     g_icall_trace_idx++; \
     g_icall_count++; \
+    DAH2_ICALL_BAD_HOOK(_va); \
+    DAH2_ICALL_SEEN_HOOK(_va); \
     if ((g_icall_watch_this && g_ecx == g_icall_watch_this) || \
         (g_icall_watch_this2 && g_ecx == g_icall_watch_this2)) \
         recomp_icall_watch_log(g_ecx, _va, (uint32_t)__LINE__); \
@@ -742,7 +777,7 @@ void recomp_icall_watch_log(uint32_t this_ptr, uint32_t target, uint32_t va_from
         RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); _fn(); \
         g_ebx = _pe; g_esi = _ps; g_edi = _pd; \
     } \
-    else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); \
+    else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); DAH2_ITAIL_FAIL_HOOK(_va); \
            recomp_icall_fail_log(_va); g_esp = (saved_esp); eax = 0; } \
 } while(0)
 
@@ -759,7 +794,7 @@ void recomp_icall_watch_log(uint32_t this_ptr, uint32_t target, uint32_t va_from
     if (!_fn) _fn = recomp_lookup(_va); \
     if (!_fn) _fn = recomp_lookup_kernel(_va); \
     if (_fn) { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_RESOLVED); _fn(); } \
-    else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); \
+    else { RECOMP_ICALL_OBSERVE(_va, RECOMP_ICALL_SEEN_UNRESOLVED); DAH2_ITAIL_FAIL_HOOK(_va); \
            recomp_icall_fail_log(_va); g_esp += 4; g_eax = 0; } \
 } while(0)
 

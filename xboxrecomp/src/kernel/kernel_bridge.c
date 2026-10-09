@@ -2282,6 +2282,12 @@ static void bridge_RtlRaiseException(void)
     uint32_t code = record_ptr ? BRIDGE_MEM32(record_ptr) : 0;
 
     static int raise_count = 0;
+#ifdef DAH2_FN_TRACE
+    {   /* trace builds: record who raised what (record, code, caller return address, first exception parameter) */
+        extern void dah2_note(uint32_t tag, uint32_t a, uint32_t b, uint32_t c);
+        dah2_note(0x52AE, record_ptr, code, BRIDGE_MEM32(g_esp));
+    }
+#endif
     raise_count++;
     if (raise_count <= 10) {
         fprintf(stderr, "  [KERNEL] RtlRaiseException: record=0x%08X code=0x%08X (#%d)\n",

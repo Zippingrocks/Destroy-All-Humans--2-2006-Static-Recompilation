@@ -1,0 +1,2 @@
+# Start held 10 polls (matches xemu_native_calls)
+1100 10 0010 0 0 0 0 0 0

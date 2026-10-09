@@ -48,6 +48,31 @@ add_subdirectory(${XBOXRECOMP_DIR} ${CMAKE_BINARY_DIR}/xboxrecomp)
 # is silently left out of the build and shows up as unresolved externals.
 file(GLOB RECOMP_GEN_SOURCES CONFIGURE_DEPENDS "src/recomp/gen/*.c")
 
+# Diagnostic build: instrument every recompiled function entry (see
+# src/dah2_fn_trace.h). Configure a separate build tree with -DDAH2_FN_TRACE=ON;
+# the repository's generated sources are not modified, instrumented copies live
+# in the build tree. Re-run cmake to refresh them after changing a source.
+option(DAH2_FN_TRACE "Instrument recompiled functions with entry tracing" OFF)
+set(DAH2_MANUAL_SOURCE src/recomp_manual.c)
+if(DAH2_FN_TRACE)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
+    set(DAH2_FNT_DIR "${CMAKE_BINARY_DIR}/gen_trace")
+    execute_process(COMMAND ${Python3_EXECUTABLE}
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools/instrument_fn_trace.py" "${DAH2_FNT_DIR}"
+        ${RECOMP_GEN_SOURCES} "${CMAKE_CURRENT_SOURCE_DIR}/src/recomp_manual.c"
+        RESULT_VARIABLE DAH2_FNT_RC)
+    if(NOT DAH2_FNT_RC EQUAL 0)
+        message(FATAL_ERROR "function-trace instrumentation failed")
+    endif()
+    set(_fnt_sources "")
+    foreach(_f ${RECOMP_GEN_SOURCES})
+        get_filename_component(_n "${_f}" NAME)
+        list(APPEND _fnt_sources "${DAH2_FNT_DIR}/${_n}")
+    endforeach()
+    set(RECOMP_GEN_SOURCES ${_fnt_sources} src/dah2_fn_trace.c)
+    set(DAH2_MANUAL_SOURCE "${DAH2_FNT_DIR}/recomp_manual.c")
+endif()
+
 # Core game sources
 set(GAME_SOURCES
     src/main.c
@@ -56,7 +81,7 @@ set(GAME_SOURCES
     src/guest_nv2a_bridge.c
     src/parity_timing.c
     src/parity_state.c
-    src/recomp_manual.c
+    ${DAH2_MANUAL_SOURCE}
     src/trace_control.c
     # Add game-specific sources here, e.g.:
     # src/asset_loader.c
@@ -79,6 +104,11 @@ add_executable(${PROJECT_NAME} WIN32
 target_link_libraries(${PROJECT_NAME} PRIVATE xboxrecomp)
 
 # Include paths for generated recomp headers
+if(DAH2_FN_TRACE)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE DAH2_FN_TRACE=1)
+    target_include_directories(${PROJECT_NAME} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/recomp/gen)
+endif()
 target_include_directories(${PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/src/recomp

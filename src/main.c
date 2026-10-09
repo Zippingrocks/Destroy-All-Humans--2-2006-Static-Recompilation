@@ -328,6 +328,11 @@ static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
             }
         }
         fflush(stdout);
+        /* DAH2_CRASH_HOLD also parks on a guest int3 (CRT terminate/_amsg paths) so the process can be inspected. */
+        if (ep->ExceptionRecord->ExceptionCode == 0x80000003u && getenv("DAH2_CRASH_HOLD")) {
+            fputs("[CRASH] holding at guest int3 (DAH2_CRASH_HOLD)\n", stdout); fflush(stdout);
+            for (;;) Sleep(1000);
+        }
     }
     if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
         uintptr_t fault_addr = ep->ExceptionRecord->ExceptionInformation[1];
@@ -396,6 +401,13 @@ static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
             }
         }
         fflush(stdout);
+        /* Diagnostic: keep the faulting thread parked here so external tools
+         * (tools/dump_*.py, read_globals.py) can inspect the live process. */
+        if (getenv("DAH2_CRASH_HOLD")) {
+            fprintf(stdout, "[CRASH] holding (DAH2_CRASH_HOLD)\n");
+            fflush(stdout);
+            for (;;) Sleep(1000);
+        }
     }
 
     return EXCEPTION_CONTINUE_SEARCH;

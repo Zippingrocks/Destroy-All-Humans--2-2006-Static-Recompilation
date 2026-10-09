@@ -146,4 +146,5 @@ def main():
         g.s.sendall(b"\x03"); g.recv(3.0)
         for b in brks: g.cmd("z1,%x,1" % b)
         g.send("c"); time.sleep(0.2); g.s.close()
-main()
+if __name__ == "__main__":
+    main()

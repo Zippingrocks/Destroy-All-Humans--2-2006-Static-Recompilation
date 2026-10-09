@@ -377,6 +377,11 @@ class FunctionTranslator:
                     continue
                 targets = self._read_local_jump_table(table_va, start, upper)
                 if not targets:
+                    # `jmp [idx*4 + base]` whose index never takes its lowest value: entries start 1-2 dwords in, or end just before base
+                    alt = self.lifter._read_jump_table_offset(table_va)[0]
+                    if alt and all(start <= t < upper for t in alt):
+                        targets = alt
+                if not targets:
                     continue
                 jump_tables[table_va] = targets
                 for target in targets:
@@ -498,6 +503,43 @@ class FunctionTranslator:
             if missing:
                 instructions = self.disasm.disassemble_function(
                     raw_bytes, start, end, resync=missing)
+
+        # A jump table that lives in .text between code is data. Linear decoding misaligns across it (and keeps decoding garbage
+        # until it happens to resync), so decode such a function by control flow from its entry and every table target instead.
+        if recovered is None:
+            table_ranges = []
+            for insn in instructions:
+                if insn.mnemonic == "jmp" and not insn.jump_target and insn.operands:
+                    rng = self.lifter.switch_table_data_range(insn.operands)
+                    if rng and start <= rng[0] < end:
+                        table_ranges.append(rng)
+            in_code_tables = bool(table_ranges)
+            if in_code_tables:
+                rec = self._recover_cfg(start, end, set(), set())
+                if rec is not None and rec[0]:
+                    # Control-flow-recovered instructions win; linear-decoded ones survive only where they overlap neither a
+                    # recovered instruction nor a jump table (code the entry point alone does not reach keeps its old decode).
+                    cfg = rec[0]
+                    def _overlaps(a, ranges):
+                        return any(a.address < hi and a.end_address > lo for lo, hi in ranges)
+                    cfg_ranges = [(i.address, i.end_address) for i in cfg]
+                    cfg_ranges.sort()
+                    import bisect as _bis
+                    cfg_starts = [r[0] for r in cfg_ranges]
+                    def _hits_cfg(a):
+                        k = _bis.bisect_right(cfg_starts, a.address) - 1
+                        if k >= 0 and cfg_ranges[k][1] > a.address:
+                            return True
+                        return k + 1 < len(cfg_ranges) and cfg_ranges[k + 1][0] < a.end_address
+                    kept = [i for i in instructions if not _overlaps(i, table_ranges) and not _hits_cfg(i)]
+                    instructions = sorted(kept + list(cfg), key=lambda i: i.address)
+                    self.lifter.jump_table_targets = rec[1]
+                    switch_leaders = set()
+                    for insn in instructions:
+                        if insn.mnemonic == "jmp" and not insn.jump_target and insn.operands:
+                            for t in self.lifter._analyze_switch_table(insn.operands):
+                                if start <= t < end:
+                                    switch_leaders.add(t)
 
         # Build basic blocks
         blocks = self.disasm.build_basic_blocks(
@@ -679,7 +721,7 @@ class FunctionTranslator:
 
 
         # Add _cf for carry-dependent instructions (sbb, adc)
-        has_carry = any(insn.mnemonic in ("sbb", "adc")
+        has_carry = any(insn.mnemonic in ("sbb", "adc", "rcl", "rcr")
                         for insn in instructions)
         if has_carry:
             lines.append(f"    int _cf = 0; /* carry flag */")
@@ -688,7 +730,10 @@ class FunctionTranslator:
         # corrupts multi-word arithmetic (add/adc pairs) and the shr/adc
         # idiom MSVC emits for odd trailing elements.
         self.lifter.needs_cf = has_carry
-        self.lifter.publishes_ebp = self._func_has_prologue(instructions)
+        self.lifter.uses_df = any(i.mnemonic == "std" for i in instructions)
+        if self.lifter.uses_df:
+            lines.append("    int _df = 0; /* x86 direction flag (std/cld) */")
+        self.lifter.publishes_ebp = self._func_has_prologue(instructions) or ("ebp" in used_regs)  # ebp may be a GPR: callee frameless helpers still read the caller's hardware ebp
 
         # SSE/MMX register declarations
         if used_xmm:

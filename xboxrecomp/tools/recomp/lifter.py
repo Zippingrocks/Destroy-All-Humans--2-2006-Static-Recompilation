@@ -676,7 +676,7 @@ def _emit_cond_goto(cond_expr, jcc, desc, target, lifter):
         # Conditional tail call: same frame bridge as the unconditional tail
         # jmp in _lift_jmp, applied only on the taken path.
         name = lifter._call_target_name(target)
-        return (f"if ({cond_expr}) {{ g_seh_ebp = ebp; {name}(); return; }}"
+        return (f"if ({cond_expr}) {{ g_seh_ebp = g_ebp = ebp; {name}(); return; }}"
                 f" /* {jcc}: {desc} */")
     return f"if ({cond_expr}) goto loc_{target:08X}; /* {jcc}: {desc} */"
 
@@ -835,6 +835,21 @@ def detect_seh_helpers(func_db, xbe_data, verbose=False):
     return prolog, epilog
 
 
+# MMX / SSE-integer mnemonics lifted by Lifter._lift_mmx (helpers live in src/recomp/recomp_mmx.h)
+MMX_BINARY = {
+    m: "MMX_" + m.upper() for m in (
+        "paddb", "paddw", "paddd", "paddsb", "paddsw", "paddusb", "paddusw",
+        "psubb", "psubw", "psubd", "psubsb", "psubsw", "psubusb", "psubusw",
+        "pcmpeqb", "pcmpeqw", "pcmpeqd", "pcmpgtb", "pcmpgtw", "pcmpgtd",
+        "pand", "pandn", "por", "pxor",
+        "pmullw", "pmulhw", "pmulhuw", "pmaddwd", "pavgb", "pavgw", "pmaxub", "pminub", "pmaxsw", "pminsw", "psadbw",
+        "punpcklbw", "punpckhbw", "punpcklwd", "punpckhwd", "punpckldq", "punpckhdq",
+        "packsswb", "packuswb", "packssdw")}
+MMX_SHIFTS = {m: "MMX_" + m.upper() for m in ("psllw", "pslld", "psllq", "psrlw", "psrld", "psrlq", "psraw", "psrad")}
+MMX_OTHER = ("pshufw", "pmovmskb", "pextrw", "pinsrw", "cvtpi2ps", "cvtps2pi", "cvttps2pi", "movntps", "movntdq",
+             "prefetchnta", "prefetcht0", "prefetcht1", "prefetcht2", "sfence", "lfence", "mfence", "rdtsc")
+MMX_MNEMONICS = frozenset(MMX_BINARY) | frozenset(MMX_SHIFTS) | frozenset(MMX_OTHER)
+
 class Lifter:
     """Translates x86 instructions to C statements."""
 
@@ -950,6 +965,8 @@ class Lifter:
             return self._lift_sar(insn, ops)
         if m in ("rol", "ror"):
             return self._lift_rotate(insn, ops, m)
+        if m in ("rcl", "rcr"):
+            return self._lift_rotate_carry(insn, ops, m)
 
         # ── Comparison / test (standalone, not part of cmp+jcc pattern) ──
         if m == "cmp":
@@ -1017,6 +1034,8 @@ class Lifter:
         if m in ("leave",):
             return ["esp = ebp;", "POP32(esp, ebp); /* leave */"]
         if m in ("cld", "std"):
+            if getattr(self, "uses_df", False):
+                return [f"_df = {1 if m == 'std' else 0}; /* {m} - direction flag */"]
             return [f"/* {m} - direction flag */"]
         if m == "lahf":
             return ["/* lahf - load AH from flags (used in FPU compare idiom) */"]
@@ -1039,6 +1058,9 @@ class Lifter:
                  "cmovl", "cmovge", "cmovle", "cmovg", "cmovs", "cmovns"):
             return self._lift_cmovcc(insn, ops, m)
 
+        # ── MMX / SSE integer (64-bit mm registers), non-temporal stores, prefetch, rdtsc ──
+        if m in MMX_MNEMONICS:
+            return self._lift_mmx(insn, m, ops)
         # ── SSE (scalar float) ──
         if m in ("movss", "movsd", "movaps", "movups", "movlps", "movhps",
                  "movlhps", "movhlps", "movapd", "movupd",
@@ -1078,6 +1100,86 @@ class Lifter:
 
         # ── Unhandled ──
         return [f"/* TODO: {m} {insn.op_str} */"]
+
+    def _lift_mmx(self, insn, m, ops):
+        """MMX / SSE-integer instructions on 64-bit mm registers (uint64_t locals), via the MMX_* helpers in recomp_mmx.h."""
+        nops = len(ops)
+        def is_mm(op):
+            return op.type == "reg" and op.reg and op.reg.startswith("mm") and not op.reg.startswith("xmm")
+        def is_xmm(op):
+            return op.type == "reg" and op.reg and op.reg.startswith("xmm")
+        def src64(op):
+            if is_mm(op):
+                return op.reg
+            if op.type == "mem":
+                return f"(uint64_t)SMEM64({_fmt_mem(op)})"
+            return None
+        todo = [f"/* TODO: {m} {insn.op_str}: unsupported operands */"]
+        if m in ("prefetchnta", "prefetcht0", "prefetcht1", "prefetcht2", "sfence", "lfence", "mfence"):
+            return [f"/* {m} {insn.op_str}: memory-ordering / cache hint, no guest-visible effect */"]
+        if m == "rdtsc":
+            return ["{ uint64_t _tsc = recomp_rdtsc(); eax = (uint32_t)_tsc; edx = (uint32_t)(_tsc >> 32); } /* rdtsc */"]
+        if m in ("movntps", "movntdq"):
+            return self._lift_sse(insn, "movaps", ops)   # the non-temporal hint is not guest-visible; the 16-byte store is
+        if m in MMX_BINARY:
+            if nops == 2 and is_xmm(ops[0]):
+                alias = {"pand": "andps", "pandn": "andnps", "por": "orps", "pxor": "xorps"}.get(m)
+                if alias:
+                    return self._lift_sse(insn, alias, ops)
+                return todo
+            if nops == 2 and is_mm(ops[0]):
+                s = src64(ops[1])
+                if s is not None:
+                    d = ops[0].reg
+                    return [f"{d} = {MMX_BINARY[m]}({d}, {s}); /* {m} */"]
+            return todo
+        if m in MMX_SHIFTS:
+            if nops == 2 and is_mm(ops[0]):
+                d = ops[0].reg
+                if ops[1].type == "imm":
+                    s = f"(uint64_t){ops[1].imm & 0xFF}u"
+                else:
+                    s = src64(ops[1])
+                if s is not None:
+                    return [f"{d} = {MMX_SHIFTS[m]}({d}, {s}); /* {m} */"]
+            return todo
+        if m == "pshufw":
+            if nops == 3 and is_mm(ops[0]) and ops[2].type == "imm":
+                s = src64(ops[1])
+                if s is not None:
+                    return [f"{ops[0].reg} = MMX_PSHUFW({s}, {ops[2].imm & 0xFF}u); /* pshufw */"]
+            return todo
+        if m == "pmovmskb":
+            if nops == 2 and ops[0].type == "reg" and is_mm(ops[1]):
+                return [f"{_fmt_operand_write(ops[0], 'MMX_PMOVMSKB(' + ops[1].reg + ')')} /* pmovmskb */"]
+            return todo
+        if m == "pextrw":
+            if nops == 3 and ops[0].type == "reg" and is_mm(ops[1]) and ops[2].type == "imm":
+                return [f"{_fmt_operand_write(ops[0], 'MMX_PEXTRW(' + ops[1].reg + ', ' + str(ops[2].imm & 0xFF) + 'u)')} /* pextrw */"]
+            return todo
+        if m == "pinsrw":
+            if nops == 3 and is_mm(ops[0]) and ops[2].type == "imm" and ops[1].type in ("reg", "mem"):
+                v = _fmt_operand_read(ops[1]) if ops[1].type == "mem" else ops[1].reg
+                return [f"{ops[0].reg} = MMX_PINSRW({ops[0].reg}, (uint32_t)({v}), {ops[2].imm & 0xFF}u); /* pinsrw */"]
+            return todo
+        if m == "cvtpi2ps":
+            if nops == 2 and is_xmm(ops[0]):
+                s = src64(ops[1])
+                if s is not None:
+                    return [f"{ops[0].reg} = XMM_CVTPI2PS({ops[0].reg}, {s}); /* cvtpi2ps */"]
+            return todo
+        if m in ("cvtps2pi", "cvttps2pi"):
+            if nops == 2 and is_mm(ops[0]):
+                trunc = 1 if m == "cvttps2pi" else 0
+                if is_xmm(ops[1]):
+                    f0, f1 = f"{ops[1].reg}.f[0]", f"{ops[1].reg}.f[1]"
+                elif ops[1].type == "mem":
+                    f0, f1 = f"MEMF({_fmt_mem(ops[1])})", f"MEMF(({_fmt_mem(ops[1])}) + 4)"
+                else:
+                    return todo
+                return [f"{ops[0].reg} = MMX_CVTPS2PI({f0}, {f1}, {trunc}); /* {m} */"]
+            return todo
+        return todo
 
     def _lift_bitscan(self, insn, ops, kind):
         """Read the source once, preserve its ZF, and scan 16/32-bit operands.
@@ -1119,7 +1221,7 @@ class Lifter:
         # [ebp-N] stores land wherever that garbage points.
         if (ops[0].type == "reg" and ops[0].reg == "ebp" and
                 ops[1].type == "reg" and ops[1].reg == "esp"):
-            out.append("g_ebp = ebp; /* publish frame for frameless callees */")
+            out.append("g_seh_ebp = g_ebp = ebp; /* publish frame for frameless callees */")
         return out
 
     def _lift_movzx(self, insn, ops):
@@ -1376,6 +1478,24 @@ class Lifter:
             ops[0], f"(uint32_t)(({signed_cast}){dst} >> {cnt})"))
         return out
 
+    def _lift_rotate_carry(self, insn, ops, m):
+        """rcl/rcr: rotate through the carry flag (the 64-bit shift/divide helpers use `rcr reg, 1` after a shr)."""
+        if len(ops) < 2:
+            return [f"/* {m}: bad operands */"]
+        if not self.needs_cf:
+            return [f"/* TODO: {m} {insn.op_str}: function does not track CF */"]
+        w = (_operand_width(ops[0]) or 4) * 8
+        mask = {8: "0xFFu", 16: "0xFFFFu", 32: "0xFFFFFFFFu"}[w]
+        dst = _fmt_operand_read(ops[0])
+        cnt = _fmt_operand_read(ops[1])
+        if m == "rcl":
+            step = f"_rt = (_rv >> {w - 1}) & 1u; _rv = ((_rv << 1) | (uint32_t)_cf) & {mask}; _cf = (int)_rt;"
+        else:
+            step = f"_rt = _rv & 1u; _rv = (_rv >> 1) | ((uint32_t)_cf << {w - 1}); _cf = (int)_rt;"
+        mod = f" % {w + 1}" if w < 32 else ""
+        return [f"{{ uint32_t _rv = (uint32_t)({dst}) & {mask}, _rt; unsigned _rn = ((unsigned)({cnt}) & 31u){mod}; "
+                f"while (_rn--) {{ {step} }} {_fmt_operand_write(ops[0], '_rv')} }} /* {m} */"]
+
     def _lift_rotate(self, insn, ops, m):
         if len(ops) < 2:
             return [f"/* {m}: bad operands */"]
@@ -1489,7 +1609,7 @@ class Lifter:
             # inherited a long-dead frame of ~0xA6 and wrote [ebp-0xa2] and
             # [ebp-0xa0] onto Xbox VA 4 and 6: exactly the fs:[4] corruption.
             if self.publishes_ebp:
-                lines.append("g_ebp = ebp; /* frame stays current across calls */")
+                lines.append("g_seh_ebp = g_ebp = ebp; /* frame stays current across calls */")
             lines.append(
                 f"PUSH32(esp, 0x{ret_va:08X}u); {name}(); "
                 f"/* call 0x{insn.call_target:08X} */")
@@ -1516,8 +1636,8 @@ class Lifter:
             # "if (status < 0)" test against esi failed and XapiInitProcess
             # bailed to the dashboard.
             if insn.call_target in (self.SEH_PROLOG, self.SEH_EPILOG):
-                lines.insert(0, "g_seh_ebp = ebp; /* publish frame to SEH helper */")
-                lines.append("ebp = g_seh_ebp; /* read back frame from SEH helper */")
+                lines.insert(0, "g_seh_ebp = g_ebp = ebp; /* publish frame to SEH helper */")
+                lines.append("ebp = g_seh_ebp; g_ebp = ebp; /* read back frame from SEH helper */")
             return lines
         elif len(ops) >= 1:
             target = _fmt_operand_read(ops[0])
@@ -1580,6 +1700,37 @@ class Lifter:
             targets.append(val)
         return targets
 
+    def _read_jump_table_offset(self, table_va):
+        """Tables addressed as `jmp [idx*4 + base]` where the index never takes its lowest value (compilers fold the bias into
+        the displacement): the real entries start 1-2 dwords after `base`, or -- for a negative index -- end just before it.
+        Only a run of >= 2 consecutive code addresses counts, and the caller still requires every target to be inside the
+        function, so a random data word cannot turn into a switch.  Returns (targets, data_lo, data_hi)."""
+        for skip in (1, 2):
+            run = self._read_jump_table(table_va + 4 * skip)
+            if len(run) >= 2:
+                return run, table_va, table_va + 4 * (skip + len(run))
+        back = []
+        va = table_va - 4
+        while len(back) < 256:
+            off = va_to_file_offset(va)
+            if off is None or off + 4 > len(self.xbe_data):
+                break
+            val = struct.unpack_from('<I', self.xbe_data, off)[0]
+            if not is_code_address(val):
+                break
+            back.insert(0, val)
+            va -= 4
+        if len(back) >= 2:
+            return back, table_va - 4 * len(back), table_va
+        return [], 0, 0
+
+    def switch_table_data_range(self, ops):
+        """Byte range [lo, hi) of an in-function jump table the switch analysis accepted (so the lifter does not decode it as code), or None."""
+        targets = self._analyze_switch_table(ops)
+        if not targets:
+            return None
+        return getattr(self, '_last_table_range', None)
+
     def _analyze_switch_table(self, ops):
         """Detect if an indirect jmp operand is an intra-function switch table.
         Pattern: jmp [reg*scale + table_base] or jmp [reg + table_base]
@@ -1593,13 +1744,21 @@ class Lifter:
             return []
         table_va = op.mem_disp
         targets = self.jump_table_targets.get(table_va)
+        self._last_table_range = None
         if targets is None:
             targets = self._read_jump_table(table_va)
+            if targets:
+                self._last_table_range = (table_va, table_va + 4 * len(targets))
+        if not targets:
+            targets, lo, hi = self._read_jump_table_offset(table_va)
+            if targets:
+                self._last_table_range = (lo, hi)
         if not targets:
             return []
         # Check that ALL targets are within the current function
         if all(self.func_start <= t < self.func_end for t in targets):
             return targets
+        self._last_table_range = None
         return []
 
     def _lift_jmp(self, insn, ops):
@@ -1608,7 +1767,7 @@ class Lifter:
                 # Tail call - no return address push (reuses current frame's)
                 # Bridge ebp so the target function can inherit our frame pointer.
                 name = self._call_target_name(insn.jump_target)
-                tail = (f"g_seh_ebp = ebp; {name}(); return; "
+                tail = (f"g_seh_ebp = g_ebp = ebp; {name}(); return; "
                         f"/* tail jmp 0x{insn.jump_target:08X} */")
                 if self.trace_exit_name:
                     # Tag the exit so a trace says which one was taken. A
@@ -1628,10 +1787,10 @@ class Lifter:
                 lines = [f"{{ uint32_t _jt = {target_expr}; /* switch: {len(switch_targets)} entries, {len(unique_targets)} targets */"]
                 for t in unique_targets:
                     lines.append(f"if (_jt == 0x{t:08X}u) goto loc_{t:08X};")
-                lines.append(f"g_seh_ebp = ebp; RECOMP_ITAIL(_jt); return; }}")
+                lines.append(f"g_seh_ebp = g_ebp = ebp; RECOMP_ITAIL(_jt); return; }}")
                 return lines
             target = _fmt_operand_read(ops[0])
-            return [f"g_seh_ebp = ebp; RECOMP_ITAIL({target}); return; /* indirect tail jmp */"]
+            return [f"g_seh_ebp = g_ebp = ebp; RECOMP_ITAIL({target}); return; /* indirect tail jmp */"]
         return ["/* jmp: no target */"]
 
     def _lift_jcc(self, insn):
@@ -1645,7 +1804,7 @@ class Lifter:
             if target:
                 if self._is_external_target(target):
                     name = self._call_target_name(target)
-                    return [f"if ({cond}) {{ g_seh_ebp = ebp; {name}(); return; }} /* {jcc} */"]
+                    return [f"if ({cond}) {{ g_seh_ebp = g_ebp = ebp; {name}(); return; }} /* {jcc} */"]
                 return [f"if ({cond}) goto loc_{target:08X}; /* {jcc} */"]
             return [f"/* {jcc} - no target */"]
 
@@ -1654,7 +1813,7 @@ class Lifter:
         if target:
             if self._is_external_target(target):
                 name = self._call_target_name(target)
-                return [f"if (_flags /* {jcc}: {desc} */) {{ g_seh_ebp = ebp; {name}(); return; }}"]
+                return [f"if (_flags /* {jcc}: {desc} */) {{ g_seh_ebp = g_ebp = ebp; {name}(); return; }}"]
             return [f"if (_flags /* {jcc}: {desc} */) goto loc_{target:08X};"]
         return [f"/* {jcc}: {desc} - no target */"]
 
@@ -1674,6 +1833,20 @@ class Lifter:
     # ── String operations ──
 
     def _lift_rep_string(self, insn, m):
+        if getattr(self, "uses_df", False):
+            w = 4 if ("sd" in m[-2:] and "cmps" not in m and "scas" not in m) or m.endswith(("movsd", "stosd")) else (2 if m.endswith("w") else 1)
+            if "movs" in m and "movss" not in m:
+                mem = {1: "MEM8", 2: "MEM16", 4: "MEM32"}[w]
+                return [f"{{ int32_t _s = _df ? -{w} : {w}; while (ecx != 0) {{ {mem}(edi) = {mem}(esi); esi += _s; edi += _s; ecx--; }} }} /* {m} (DF-aware) */"]
+            if "stos" in m:
+                mem = {1: "MEM8", 2: "MEM16", 4: "MEM32"}[w]; val = {1: "LO8(eax)", 2: "LO16(eax)", 4: "eax"}[w]
+                return [f"{{ int32_t _s = _df ? -{w} : {w}; while (ecx != 0) {{ {mem}(edi) = {val}; edi += _s; ecx--; }} }} /* {m} (DF-aware) */"]
+            if "cmpsb" in m or "scasb" in m:
+                continue_on_equal = "repne" not in m and "repnz" not in m
+                stop_condition = "!_flags" if continue_on_equal else "_flags"
+                cmp = "MEM8(esi) == MEM8(edi)" if "cmpsb" in m else "LO8(eax) == MEM8(edi)"
+                adv = "esi += _s; edi += _s;" if "cmpsb" in m else "edi += _s;"
+                return [f"{{ int32_t _s = _df ? -1 : 1; while (ecx != 0) {{ _flags = ({cmp}); {adv} ecx--; if ({stop_condition}) break; }} }} /* {m} (DF-aware) */"]
         if "movsb" in m:
             return ["memcpy((void*)XBOX_PTR(edi), (void*)XBOX_PTR(esi), ecx);",
                     "esi += ecx; edi += ecx; ecx = 0; /* rep movsb */"]
@@ -1961,7 +2134,8 @@ class Lifter:
         # ── Comparison ──
         if m in ("comiss", "comisd", "ucomiss", "ucomisd"):
             if nops >= 2:
-                return [f"/* {m} {_sse_read(ops[0])}, {_sse_read(ops[1])} - sets EFLAGS */"]
+                return [f"g_fp_cmp = RECOMP_FCMP({_sse_read(ops[0])}, {_sse_read(ops[1])}); "
+                        f"/* {m} {_sse_read(ops[0])}, {_sse_read(ops[1])} - sets EFLAGS */"]
 
         # ── Bitwise ──
         # Done on the integer lanes: these carry sign-mask and select idioms
@@ -2455,6 +2629,19 @@ def lift_basic_block(lifter, bb, flag_state=None):
             last_flag_setter = curr.mnemonic
             last_flag_ops = list(curr.operands)
             i += consumed
+            continue
+
+        # LAHF that follows an x87 compare-to-EFLAGS (fcomi/fucomi[p], possibly with an FSTP in
+        # between) or a non-adjacent scalar SSE compare: build AH from the saved comparison result
+        # (g_fp_cmp: -1 below, 0 equal, 1 above, 2 unordered) -- the same CF/ZF/PF encoding the
+        # adjacent-SSE pattern uses.  Without this the common `lahf; test ah,0x44; jp` idiom read a
+        # stale AH (e.g. lua_tonumber's NaN check).
+        if curr.mnemonic == "lahf" and last_flag_setter in (
+                "fcompi", "fcomip", "fucomi", "fucompi", "fucomip", "fcomi",
+                "comiss", "comisd", "ucomiss", "ucomisd"):
+            stmts.append("SET_HI8(eax, (g_fp_cmp == 2) ? 0x47u : (g_fp_cmp < 0) ? 0x03u : "
+                         "(g_fp_cmp == 0) ? 0x42u : 0x02u); /* lahf after FP compare */")
+            i += 1
             continue
 
         # Try cmp/test + jcc pattern first (2-instruction match)

@@ -3487,7 +3487,7 @@ void sub_00296224(void)
  * stack-reset workaround, because source and destination may overlap. */
 void sub_0016E200(void)
 {
-    uint32_t ebp = g_ebp;
+    uint32_t ebp = g_seh_ebp;
     uint32_t target;
     {
         uint32_t sequence = g_dah2_draw_record_sequence++;
@@ -5018,7 +5018,7 @@ extern __declspec(thread) uint32_t g_ebp;
 static volatile long g_call_count_FCB03;
 void sub_000FCB03(void)
 {
-    uint32_t ebp = g_ebp;
+    uint32_t ebp = g_seh_ebp;
     long _n = InterlockedIncrement(&g_call_count_FCB03);
     int _trace = (_n <= 20 || (_n % 50000) == 0);
     PUSH32(esp, ebp);
@@ -6320,4 +6320,14 @@ void recomp_icall_fail_log(uint32_t va)
             DAH2_TRACE_FPRINTF(stderr, "    [%2d] 0x%08X\n", i, g_icall_trace[idx]);
     }
     fflush(stderr);
+}
+
+/* rdtsc: Xbox TSC (733.33 MHz) from the host performance counter */
+uint64_t recomp_rdtsc(void)
+{
+    static LARGE_INTEGER s_freq;
+    LARGE_INTEGER c;
+    if (!s_freq.QuadPart) QueryPerformanceFrequency(&s_freq);
+    QueryPerformanceCounter(&c);
+    return (uint64_t)(((double)c.QuadPart * 733333333.0) / (double)s_freq.QuadPart);
 }
