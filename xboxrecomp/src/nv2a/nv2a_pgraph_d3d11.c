@@ -12,6 +12,7 @@
  */
 
 #include "nv2a_pgraph_d3d11.h"
+#define PGRAPH_SURFACE_SLOTS 12 /* host render-target / depth slots (title + scene + offscreen passes) */
 #include "nv2a_regs.h"
 #include "nv2a_vertex_program.h"
 #include <stdio.h>
@@ -199,7 +200,7 @@ static struct {
         ID3D11RenderTargetView *rtv;
         ID3D11Texture2D *depth;
         ID3D11DepthStencilView *dsv;
-    } array_surfaces[4];
+    } array_surfaces[PGRAPH_SURFACE_SLOTS];
     struct {
         uint32_t guest_offset;
         unsigned width,height;
@@ -208,7 +209,7 @@ static struct {
         UINT pending_clear_flags;
         float pending_clear_depth;
         UINT8 pending_clear_stencil;
-    } array_depths[4];
+    } array_depths[PGRAPH_SURFACE_SLOTS];
     PgraphD3D11RecentDraw recent_draws[64];
     unsigned recent_draw_cursor,recent_draw_total;
 
@@ -388,7 +389,7 @@ void pgraph_d3d11_init(void)
 
 void pgraph_d3d11_shutdown(void)
 {
-    for (unsigned i=0;i<4;i++) {
+    for (unsigned i=0;i<PGRAPH_SURFACE_SLOTS;i++) {
         if (g_pg.array_surfaces[i].dsv) {
             ID3D11DepthStencilView_Release(g_pg.array_surfaces[i].dsv);
             g_pg.array_surfaces[i].dsv=NULL;
@@ -406,7 +407,7 @@ void pgraph_d3d11_shutdown(void)
             g_pg.array_surfaces[i].texture=NULL;
         }
     }
-    for (unsigned i=0;i<4;i++) {
+    for (unsigned i=0;i<PGRAPH_SURFACE_SLOTS;i++) {
         if (g_pg.array_depths[i].dsv) {
             ID3D11DepthStencilView_Release(g_pg.array_depths[i].dsv);
             g_pg.array_depths[i].dsv=NULL;

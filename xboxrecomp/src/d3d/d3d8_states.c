@@ -189,9 +189,20 @@ static void update_depth_stencil_state(const DWORD *rs)
         fprintf(stderr, "D3D8: CreateDepthStencilState failed: 0x%08lX\n", hr);
 }
 
+/* Scissor rectangle (NV2A window clip) set by the pgraph translator around a draw. */
+static int       g_scissor_enable;
+static D3D11_RECT g_scissor_rect;
+
+void d3d8_states_set_scissor(int enable, int left, int top, int right, int bottom)
+{
+    g_scissor_enable = enable ? 1 : 0;
+    g_scissor_rect.left = left; g_scissor_rect.top = top;
+    g_scissor_rect.right = right; g_scissor_rect.bottom = bottom;
+}
+
 static void update_rasterizer_state(const DWORD *rs)
 {
-    DWORD hash = hash_raster_states(rs);
+    DWORD hash = hash_raster_states(rs) ^ (g_scissor_enable ? 0x9E3779B1u : 0u);
     D3D11_RASTERIZER_DESC rd;
     HRESULT hr;
 
@@ -220,7 +231,7 @@ static void update_rasterizer_state(const DWORD *rs)
 
     rd.FrontCounterClockwise = FALSE;
     rd.DepthClipEnable = TRUE;
-    rd.ScissorEnable = FALSE;
+    rd.ScissorEnable = g_scissor_enable ? TRUE : FALSE;
     rd.MultisampleEnable = FALSE;
     rd.AntialiasedLineEnable = FALSE;
 
@@ -372,6 +383,8 @@ void d3d8_states_apply(void)
         ID3D11DeviceContext_OMSetDepthStencilState(ctx, g_ds_state, rs[D3DRS_STENCILREF]);
     if (g_raster_state)
         ID3D11DeviceContext_RSSetState(ctx, g_raster_state);
+    if (g_scissor_enable)
+        ID3D11DeviceContext_RSSetScissorRects(ctx, 1, &g_scissor_rect);
 
     /* Apply samplers for all 4 texture stages */
     {

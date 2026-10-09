@@ -32,6 +32,7 @@ volatile uint8_t g_dah2_pgraph_draw_constant_valid[64][NV2A_VP_CONSTANTS*4];
 volatile float g_dah2_pgraph_draw_outputs[64][NV2A_VP_OUTPUTS][4];
 volatile uint8_t g_dah2_pgraph_draw_output_masks[64][NV2A_VP_OUTPUTS];
 volatile uint32_t g_dah2_pgraph_draw_memory_failures[64][11];
+volatile uint32_t g_dah2_pg_generic_draws,g_dah2_pg_generic_prims; /* generic scene profile submissions (the per-profile ring arrays are fixed at 10 entries) */
 static NV2AInlineArrayLayout g_pg_inline_layout;
 
 static unsigned pgraph_array_profile(void);
@@ -154,9 +155,11 @@ enum {
     PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT2,
     PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT4,
     PGRAPH_ARRAY_PROFILE_DAH2_SCENE_TEXTURED,
-    PGRAPH_ARRAY_PROFILE_DAH2_SCENE_UNTEXTURED
+    PGRAPH_ARRAY_PROFILE_DAH2_SCENE_UNTEXTURED,
+    PGRAPH_ARRAY_PROFILE_DAH2_SCENE_GENERIC /* any register-combiner program, up to four 2D textures */
 };
 
+#include "../d3d/d3d8_swizzle.h"
 static int pgraph_dah2_scene_texture_format(unsigned stage) {
     unsigned d=stage*0x40;uint32_t format=PG_REG(NV097_SET_TEXTURE_FORMAT+d);
     unsigned color=(format>>8)&0xFF,varying=(format>>16)&15;
@@ -214,6 +217,28 @@ static int pgraph_dah2_scene_untextured(void) {
         PG_REG(NV097_SET_COMBINER_ALPHA_ICW)==0xD430D030 && PG_REG(NV097_SET_COMBINER_ALPHA_ICW+4)==0xD430D030 &&
         PG_REG(NV097_SET_COMBINER_ALPHA_OCW)==0x00010C00 && PG_REG(NV097_SET_COMBINER_ALPHA_OCW+4)==0x00000C00 &&
         pgraph_dah2_final_combiner();
+}
+
+static int pgraph_dah2_scene_generic(void) {
+    /* Bisecting switches: DAH2_GENERIC_OFF=1 disables the generic profile; DAH2_GENERIC_NO_OFFSCREEN=1 limits it to full-size targets;
+     * DAH2_GENERIC_MIN_VERTS / DAH2_GENERIC_MAX_VERTS bound the draw size (the 4-vertex quads are the post-process passes). */
+    static int off=-1,no_offscreen=-1;static unsigned min_verts,max_verts;
+    if(off<0) {
+        off=getenv("DAH2_GENERIC_OFF")!=NULL;no_offscreen=getenv("DAH2_GENERIC_NO_OFFSCREEN")!=NULL;
+        min_verts=getenv("DAH2_GENERIC_MIN_VERTS") ? (unsigned)atoi(getenv("DAH2_GENERIC_MIN_VERTS")) : 0u;
+        max_verts=getenv("DAH2_GENERIC_MAX_VERTS") ? (unsigned)atoi(getenv("DAH2_GENERIC_MAX_VERTS")) : 0xFFFFFFFFu;
+    }
+    if(off || g_pg.index_count<min_verts || g_pg.index_count>max_verts) return 0;
+    if(no_offscreen && ((g_pg.surface_clip_h>>16)!=640u || (g_pg.surface_clip_v>>16)!=480u)) return 0;
+    unsigned stages=PG_REG(NV097_SET_COMBINER_CONTROL)&15u;
+    if(stages<1 || stages>8) return 0;
+    uint32_t program=PG_REG(NV097_SET_SHADER_STAGE_PROGRAM);
+    for(unsigned s=0;s<4;s++) {
+        unsigned mode=(program>>(s*5))&31u;
+        if(mode!=0 && mode!=1) return 0; /* 2D only for now (no cube/3D/bump/pass-through stages) */
+        if(mode==1 && !(PG_REG(NV097_SET_TEXTURE_CONTROL0+s*0x40)&NV097_SET_TEXTURE_CONTROL0_ENABLE)) return 0;
+    }
+    return 1;
 }
 
 static unsigned pgraph_array_profile(void) {
@@ -333,7 +358,7 @@ static unsigned pgraph_array_profile(void) {
         PG_REG(NV097_SET_TEXTURE_ADDRESS)==0x10101 &&
         PG_REG(NV097_SET_TEXTURE_FILTER)==0x02023F01)
         return PGRAPH_ARRAY_PROFILE_MOVIE;
-    return PGRAPH_ARRAY_PROFILE_NONE;
+    return pgraph_dah2_scene_generic() ? PGRAPH_ARRAY_PROFILE_DAH2_SCENE_GENERIC : PGRAPH_ARRAY_PROFILE_NONE;
 }
 
 static uint32_t pgraph_supported_array_state(unsigned profile) {
@@ -350,6 +375,7 @@ static uint32_t pgraph_supported_array_state(unsigned profile) {
     for (unsigned i=0;i<sizeof(pairs)/sizeof(pairs[0]);i++)
         if (PG_REG(pairs[i][0])!=pairs[i][1]) return pairs[i][0];
     if (PG_REG(NV097_SET_SURFACE_FORMAT)!=0x124u &&
+        !(profile==PGRAPH_ARRAY_PROFILE_DAH2_SCENE_GENERIC && PG_REG(NV097_SET_SURFACE_FORMAT)==0x128u) &&
         !(g_pg.index_source==3u && !g_pg.depth_test &&
           PG_REG(NV097_SET_SURFACE_FORMAT)==0x128u))
         return NV097_SET_SURFACE_FORMAT;
@@ -362,7 +388,7 @@ static uint32_t pgraph_supported_array_state(unsigned profile) {
         PG_REG(NV097_SET_FOG_MODE)!=NV097_SET_FOG_MODE_V_EXP_ABS && PG_REG(NV097_SET_FOG_MODE)!=NV097_SET_FOG_MODE_V_EXP2_ABS))
         return NV097_SET_FOG_MODE;
     if (!profile) return NV097_SET_COMBINER_CONTROL;
-    if (profile!=PGRAPH_ARRAY_PROFILE_DAH2_ACCUMULATE4_XRGB)
+    if (profile!=PGRAPH_ARRAY_PROFILE_DAH2_ACCUMULATE4_XRGB && profile!=PGRAPH_ARRAY_PROFILE_DAH2_SCENE_GENERIC)
         for (unsigned stage=((profile==PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT2 ||
             profile==PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT4) ? 2u : 1u);stage<4;stage++)
             if (PG_REG(NV097_SET_TEXTURE_CONTROL0+stage*0x40)&(1u<<30)) return NV097_SET_TEXTURE_CONTROL0+stage*0x40;
@@ -375,7 +401,11 @@ static uint32_t pgraph_supported_array_state(unsigned profile) {
         return NV097_SET_BLEND_FUNC_SFACTOR;
     if (g_pg.cull_enable && (PG_REG(NV097_SET_CULL_FACE)!=0x405 || PG_REG(NV097_SET_FRONT_FACE)!=0x900))
         return NV097_SET_CULL_FACE;
-    if (profile==PGRAPH_ARRAY_PROFILE_DAH2_SUBTRACT_XRGB ||
+    if (profile>=PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT2) {
+        unsigned gw=g_pg.surface_clip_h>>16,gh=g_pg.surface_clip_v>>16;
+        if ((g_pg.surface_clip_h&0xFFFF) || (g_pg.surface_clip_v&0xFFFF) || !gw || !gh || gw>2048 || gh>2048)
+            return NV097_SET_SURFACE_CLIP_HORIZONTAL;
+    } else if (profile==PGRAPH_ARRAY_PROFILE_DAH2_SUBTRACT_XRGB ||
         profile==PGRAPH_ARRAY_PROFILE_DAH2_ACCUMULATE4_XRGB) {
         /* The title scene is deliberately rendered through the game's
          * 320x240 UI surface before its presentation pass. */
@@ -385,6 +415,12 @@ static uint32_t pgraph_supported_array_state(unsigned profile) {
                (g_pg.surface_clip_h>>16)!=d3d8_GetBackbufferWidth() ||
                (g_pg.surface_clip_v>>16)!=d3d8_GetBackbufferHeight()) {
         return NV097_SET_SURFACE_CLIP_HORIZONTAL;
+    }
+    if (profile>=PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT2) {
+        /* A window clip narrower than the surface becomes a host scissor rectangle (set around the draw). */
+        if (PG_REG(NV097_SET_WINDOW_CLIP_TYPE)) return NV097_SET_WINDOW_CLIP_TYPE;
+        /* Only window-clip rectangle 0 is programmed by the title; rectangles 1..7 stay at their reset value. */
+        return 0;
     }
     if (PG_REG(NV097_SET_WINDOW_CLIP_HORIZONTAL)!=g_pg.surface_clip_h ||
         PG_REG(NV097_SET_WINDOW_CLIP_VERTICAL)!=g_pg.surface_clip_v || PG_REG(NV097_SET_WINDOW_CLIP_TYPE))
@@ -461,8 +497,11 @@ static int pgraph_read_vertex(uint32_t index,unsigned attributes,NV2AVertexResul
 }
 
 typedef struct {
-    float x,y,z,rhw;uint32_t diffuse,specular;float u0,v0,u1,v1;
-} PgraphSceneVertex; /* specular.a carries the NV2A fog factor (oFog through the fog mode; 255 = unfogged) */
+    float x,y,z,rhw;uint32_t diffuse,specular;float u0,v0,u1,v1,u2,v2,u3,v3;
+} PgraphSceneVertex;
+
+/* Linear (unnormalised) NV2A textures carry texel coordinates; D3D samples with 0..1.  Set per draw before vertices are packed. */
+static float g_pg_stage_scale[4][2]={{1,1},{1,1},{1,1},{1,1}}; /* specular.a carries the NV2A fog factor (oFog through the fog mode; 255 = unfogged) */
 
 /* Fog factor from the vertex program's oFog.x, after xemu's glsl/vsh.c: the programmable pipeline feeds oFog.x through the
  * fog mode and FOG_PARAMS; the pixel side clamps it to 0..1 and uses it as the FOG register alpha of the final combiner. */
@@ -486,7 +525,7 @@ static float pgraph_fog_factor(float coord) {
 }
 
 static int pgraph_pack_scene_vertex(const NV2AVertexResult *r,PgraphSceneVertex *v) {
-    if(r->written_mask[0]!=15 || r->written_mask[3]!=15) return 0;
+    if(r->written_mask[0]!=15) return 0;
     float w=r->output[0][3];
     if(!isfinite(r->output[0][0]) || !isfinite(r->output[0][1]) ||
        !isfinite(r->output[0][2]) || !isfinite(w) || w==0) {
@@ -494,7 +533,7 @@ static int pgraph_pack_scene_vertex(const NV2AVertexResult *r,PgraphSceneVertex 
          * strip alive with an off-screen sentinel instead of rejecting the
          * complete draw and losing later valid triangles. */
         v->x=-1000000.0f;v->y=-1000000.0f;v->z=1.0f;v->rhw=1.0f;
-        v->diffuse=0;v->specular=0;v->u0=0;v->v0=0;v->u1=0;v->v1=0;
+        v->diffuse=0;v->specular=0;v->u0=0;v->v0=0;v->u1=0;v->v1=0;v->u2=0;v->v2=0;v->u3=0;v->v3=0;
         return 1;
     }
     float inv=1.0f/w;
@@ -506,7 +545,7 @@ static int pgraph_pack_scene_vertex(const NV2AVertexResult *r,PgraphSceneVertex 
     v->z=r->output[0][2]/u2f(PG_REG(NV097_SET_CLIP_MAX));
     v->rhw=inv;uint32_t color[4];
     for(unsigned c=0;c<4;c++) {
-        float component=isnan(r->output[3][c]) ? 1.0f : r->output[3][c];
+        float component=isnan(r->output[3][c]) || !(r->written_mask[3]&(8u>>c)) ? 1.0f : r->output[3][c];
         color[c]=(uint32_t)floorf(fminf(1,fmaxf(0,component))*255.0f+0.5f);
     }
     v->diffuse=(color[3]<<24)|(color[0]<<16)|(color[1]<<8)|color[2];
@@ -517,10 +556,13 @@ static int pgraph_pack_scene_vertex(const NV2AVertexResult *r,PgraphSceneVertex 
       }
       float fog=(r->written_mask[5]&8) && isfinite(r->output[5][0]) ? pgraph_fog_factor(r->output[5][0]) : 1.0f;
       v->specular=((uint32_t)floorf(fog*255.0f+0.5f)<<24)|(spec[0]<<16)|(spec[1]<<8)|spec[2]; }
-    v->u0=(r->written_mask[9]&8) && isfinite(r->output[9][0]) ? r->output[9][0] : 0;
-    v->v0=(r->written_mask[9]&4) && isfinite(r->output[9][1]) ? r->output[9][1] : 0;
-    v->u1=(r->written_mask[10]&8) && isfinite(r->output[10][0]) ? r->output[10][0] : 0;
-    v->v1=(r->written_mask[10]&4) && isfinite(r->output[10][1]) ? r->output[10][1] : 0;
+    { float *uv[4]={&v->u0,&v->u1,&v->u2,&v->u3};
+      float *vv[4]={&v->v0,&v->v1,&v->v2,&v->v3};
+      for(unsigned s=0;s<4;s++) {
+          unsigned o=9+s;
+          *uv[s]=(r->written_mask[o]&8) && isfinite(r->output[o][0]) ? r->output[o][0]*g_pg_stage_scale[s][0] : 0;
+          *vv[s]=(r->written_mask[o]&4) && isfinite(r->output[o][1]) ? r->output[o][1]*g_pg_stage_scale[s][1] : 0;
+      } }
     return isfinite(v->x)&&isfinite(v->y)&&isfinite(v->z)&&isfinite(v->rhw);
 }
 
@@ -590,14 +632,14 @@ static int pgraph_pack_vertex4(const NV2AVertexResult *r,PgraphOutputVertex4 *v,
 }
 
 static int pgraph_surface_index(uint32_t guest_offset) {
-    for (unsigned i=0;i<4;i++)
+    for (unsigned i=0;i<PGRAPH_SURFACE_SLOTS;i++)
         if (g_pg.array_surfaces[i].texture && g_pg.array_surfaces[i].guest_offset==guest_offset)
             return (int)i;
     return -1;
 }
 
 static int pgraph_depth_index(uint32_t guest_offset,unsigned width,unsigned height) {
-    for (unsigned i=0;i<4;i++)
+    for (unsigned i=0;i<PGRAPH_SURFACE_SLOTS;i++)
         if (g_pg.array_depths[i].dsv &&
             g_pg.array_depths[i].guest_offset==guest_offset &&
             g_pg.array_depths[i].width==width &&
@@ -610,8 +652,8 @@ static int pgraph_ensure_depth(uint32_t guest_offset,unsigned width,unsigned hei
     int existing=pgraph_depth_index(guest_offset,width,height);
     if (existing>=0) return existing;
     unsigned slot;
-    for (slot=0;slot<4;slot++) if (!g_pg.array_depths[slot].dsv) break;
-    if (slot==4 || !width || !height) return -1;
+    for (slot=0;slot<PGRAPH_SURFACE_SLOTS;slot++) if (!g_pg.array_depths[slot].dsv) break;
+    if (slot==PGRAPH_SURFACE_SLOTS || !width || !height) return -1;
     D3D11_TEXTURE2D_DESC desc={0};
     desc.Width=width;desc.Height=height;desc.MipLevels=1;desc.ArraySize=1;
     desc.Format=DXGI_FORMAT_D24_UNORM_S8_UINT;desc.SampleDesc.Count=1;
@@ -653,18 +695,32 @@ static int pgraph_bind_surface_depth(unsigned surface_slot,uint32_t guest_offset
     return 0;
 }
 
+static void pgraph_release_surface(unsigned slot) {
+    if (g_pg.array_surfaces[slot].dsv) ID3D11DepthStencilView_Release(g_pg.array_surfaces[slot].dsv);
+    if (g_pg.array_surfaces[slot].depth) ID3D11Texture2D_Release(g_pg.array_surfaces[slot].depth);
+    if (g_pg.array_surfaces[slot].rtv) ID3D11RenderTargetView_Release(g_pg.array_surfaces[slot].rtv);
+    if (g_pg.array_surfaces[slot].texture) g_pg.array_surfaces[slot].texture->lpVtbl->Release(g_pg.array_surfaces[slot].texture);
+    memset(&g_pg.array_surfaces[slot],0,sizeof(g_pg.array_surfaces[slot]));
+}
+
 static int pgraph_ensure_surface(IDirect3DDevice8 *dev,uint32_t guest_offset,
     unsigned width,unsigned height,unsigned guest_pitch) {
     int existing=pgraph_surface_index(guest_offset);
     if (existing>=0) {
-        if (g_pg.array_surfaces[existing].width!=width ||
-            g_pg.array_surfaces[existing].height!=height) return -1;
+        /* A smaller surface clip is only a draw rectangle inside the same target; the target is re-created only when the guest
+         * needs more room than it has (the offset was reused for a larger render target). */
+        if (width>g_pg.array_surfaces[existing].width || height>g_pg.array_surfaces[existing].height) {
+            pgraph_release_surface((unsigned)existing);
+            existing=-1;
+        } else
         return pgraph_bind_surface_depth((unsigned)existing,
-            PG_REG(NV097_SET_SURFACE_ZETA_OFFSET),width,height) ? -1 : existing;
+            PG_REG(NV097_SET_SURFACE_ZETA_OFFSET),g_pg.array_surfaces[existing].width,
+            g_pg.array_surfaces[existing].height) ? -1 : existing;
     }
+    if (guest_pitch/4u>width && guest_pitch/4u<=2048u) width=guest_pitch/4u;
     unsigned slot;
-    for (slot=0;slot<4;slot++) if (!g_pg.array_surfaces[slot].texture) break;
-    if (slot==4 || !width || !height) return -1;
+    for (slot=0;slot<PGRAPH_SURFACE_SLOTS;slot++) if (!g_pg.array_surfaces[slot].texture) break;
+    if (slot==PGRAPH_SURFACE_SLOTS || !width || !height) return -1;
     IDirect3DTexture8 *texture=NULL;
     if (FAILED(dev->lpVtbl->CreateTexture(dev,width,height,1,D3DUSAGE_RENDERTARGET,
         D3DFMT_LIN_A8R8G8B8,0,&texture)) || !texture) return -1;
@@ -1007,11 +1063,141 @@ static int pgraph_upload_array_texture(IDirect3DDevice8 *dev,unsigned width,unsi
     return valid && SUCCEEDED(hr) ? 0 : PGRAPH_REJECT_DEVICE;
 }
 
+/* Textures that must survive eviction while a draw's other stages are being uploaded. */
+static IDirect3DTexture8 *g_pg_scene_protect[4];
+
+/* Decode an uncompressed NV2A texture (swizzled or linear) to host A8R8G8B8.  Returns 0 or a PGRAPH_REJECT_* code. */
+static int pgraph_decode_uncompressed_texture(unsigned stage,uint32_t **out,unsigned *ow,unsigned *oh) {
+    unsigned d=stage*0x40;
+    uint32_t address=PG_REG(NV097_SET_TEXTURE_OFFSET+d),format=PG_REG(NV097_SET_TEXTURE_FORMAT+d);
+    unsigned color=(format>>8)&0xFF;
+    unsigned bpp=0,kind=0;int swizzled=0;
+    enum {K_Y8=1,K_AY8,K_A1R5G5B5,K_X1R5G5B5,K_A4R4G4B4,K_R5G6B5,K_A8R8G8B8,K_X8R8G8B8,K_A8,K_A8Y8};
+    switch(color) {
+    case 0x00: bpp=1;kind=K_Y8;swizzled=1;break;      case 0x13: bpp=1;kind=K_Y8;break;
+    case 0x01: bpp=1;kind=K_AY8;swizzled=1;break;     case 0x1B: bpp=1;kind=K_AY8;break;
+    case 0x02: bpp=2;kind=K_A1R5G5B5;swizzled=1;break;case 0x10: bpp=2;kind=K_A1R5G5B5;break;
+    case 0x03: bpp=2;kind=K_X1R5G5B5;swizzled=1;break;case 0x1C: bpp=2;kind=K_X1R5G5B5;break;
+    case 0x04: bpp=2;kind=K_A4R4G4B4;swizzled=1;break;case 0x1D: bpp=2;kind=K_A4R4G4B4;break;
+    case 0x05: bpp=2;kind=K_R5G6B5;swizzled=1;break;  case 0x11: bpp=2;kind=K_R5G6B5;break;
+    case 0x06: bpp=4;kind=K_A8R8G8B8;swizzled=1;break;case 0x12: bpp=4;kind=K_A8R8G8B8;break;
+    case 0x07: bpp=4;kind=K_X8R8G8B8;swizzled=1;break;case 0x1E: bpp=4;kind=K_X8R8G8B8;break;
+    case 0x19: bpp=1;kind=K_A8;swizzled=1;break;      case 0x1F: bpp=1;kind=K_A8;break;
+    case 0x1A: bpp=2;kind=K_A8Y8;swizzled=1;break;    case 0x20: bpp=2;kind=K_A8Y8;break;
+    default: return PGRAPH_REJECT_STATE;
+    }
+    if((format&NV097_SET_TEXTURE_FORMAT_CUBEMAP_ENABLE) || ((format>>4)&15u)!=2u) return PGRAPH_REJECT_STATE;
+    unsigned width,height,pitch;
+    if(swizzled) {
+        width=1u<<((format>>20)&15u);height=1u<<((format>>24)&15u);pitch=width*bpp;
+    } else {
+        uint32_t rect=PG_REG(NV097_SET_TEXTURE_IMAGE_RECT+d);
+        width=rect>>16;height=rect&0xFFFFu;pitch=PG_REG(NV097_SET_TEXTURE_CONTROL1+d)>>16;
+        if(pitch<width*bpp) return PGRAPH_REJECT_LIMIT;
+    }
+    if(!width || !height || width>2048 || height>2048 || !g_pg_guest_reader) return PGRAPH_REJECT_LIMIT;
+    uint64_t span=(uint64_t)(height-1)*pitch+(uint64_t)width*bpp;
+    if((uint64_t)address+span>0x100000000ULL) return PGRAPH_REJECT_MEMORY;
+    unsigned char *raw=(unsigned char *)malloc((size_t)width*height*bpp);
+    uint32_t *pixels=(uint32_t *)malloc((size_t)width*height*4u);
+    if(!raw || !pixels) { free(raw);free(pixels);return PGRAPH_REJECT_LIMIT; }
+    if(swizzled) {
+        unsigned char *swz=(unsigned char *)malloc((size_t)width*height*bpp);
+        if(!swz || !g_pg_guest_reader(address,swz,(size_t)width*height*bpp)) { free(swz);free(raw);free(pixels);return PGRAPH_REJECT_MEMORY; }
+        xbox_unswizzle_rect(raw,swz,width,height,bpp);free(swz);
+    } else for(unsigned y=0;y<height;y++)
+        if(!g_pg_guest_reader(address+y*pitch,raw+(size_t)y*width*bpp,width*bpp)) { free(raw);free(pixels);return PGRAPH_REJECT_MEMORY; }
+    for(size_t i=0;i<(size_t)width*height;i++) {
+        uint32_t a=255,r=0,g=0,b=0;
+        if(bpp==4) {
+            uint32_t v=((const uint32_t *)raw)[i];
+            a=kind==K_X8R8G8B8 ? 255u : v>>24;r=(v>>16)&255u;g=(v>>8)&255u;b=v&255u;
+        } else if(bpp==2) {
+            uint32_t v=((const uint16_t *)raw)[i];
+            if(kind==K_A1R5G5B5 || kind==K_X1R5G5B5) {
+                a=kind==K_X1R5G5B5 ? 255u : ((v>>15)&1u)*255u;
+                r=((v>>10)&31u)*255u/31u;g=((v>>5)&31u)*255u/31u;b=(v&31u)*255u/31u;
+            } else if(kind==K_A4R4G4B4) {
+                a=((v>>12)&15u)*17u;r=((v>>8)&15u)*17u;g=((v>>4)&15u)*17u;b=(v&15u)*17u;
+            } else if(kind==K_R5G6B5) {
+                r=((v>>11)&31u)*255u/31u;g=((v>>5)&63u)*255u/63u;b=(v&31u)*255u/31u;
+            } else { /* A8Y8: byte0 = Y, byte1 = A */
+                r=g=b=v&255u;a=v>>8;
+            }
+        } else {
+            uint32_t v=raw[i];
+            if(kind==K_A8) { a=v;r=g=b=255u; } else if(kind==K_AY8) { a=v;r=g=b=v; } else { r=g=b=v; }
+        }
+        pixels[i]=(a<<24)|(r<<16)|(g<<8)|b;
+    }
+    free(raw);*out=pixels;*ow=width;*oh=height;return 0;
+}
+
+/* Texture-coordinate scale for a stage: linear formats are sampled with texel coordinates. */
+static void pgraph_stage_scale(unsigned stage,float *sx,float *sy) {
+    unsigned d=stage*0x40;
+    uint32_t format=PG_REG(NV097_SET_TEXTURE_FORMAT+d);
+    unsigned color=(format>>8)&0xFF;
+    int linear=(color>=0x10 && color<=0x13) || (color>=0x17 && color<=0x18) || (color>=0x1B && color<=0x24 && color!=0x1A);
+    if(color==0x0C || color==0x0E || color==0x0F) linear=0;
+    *sx=1.0f;*sy=1.0f;
+    if(linear) {
+        uint32_t rect=PG_REG(NV097_SET_TEXTURE_IMAGE_RECT+d);
+        unsigned w=rect>>16,h=rect&0xFFFFu;
+        if(w) *sx=1.0f/(float)w;
+        if(h) *sy=1.0f/(float)h;
+    }
+}
+
 static int pgraph_upload_scene_texture(IDirect3DDevice8 *dev,unsigned stage,
     IDirect3DTexture8 *protected_texture,IDirect3DTexture8 **result) {
     uint32_t address=PG_REG(NV097_SET_TEXTURE_OFFSET+stage*0x40);
     uint32_t format=PG_REG(NV097_SET_TEXTURE_FORMAT+stage*0x40);
     unsigned color=(format>>8)&0xFF;
+    if(color!=NV097_SET_TEXTURE_FORMAT_COLOR_L_DXT1_A1R5G5B5 && color!=NV097_SET_TEXTURE_FORMAT_COLOR_L_DXT23_A8R8G8B8 &&
+       color!=NV097_SET_TEXTURE_FORMAT_COLOR_L_DXT45_A8R8G8B8) {
+        uint32_t *pixels=NULL;unsigned uw=0,uh=0;
+        int rc=pgraph_decode_uncompressed_texture(stage,&pixels,&uw,&uh);
+        if(rc) return rc;
+        uint64_t hash=1469598103934665603ULL;
+        for(size_t i=0;i<(size_t)uw*uh;i++) { hash^=pixels[i];hash*=1099511628211ULL; }
+        unsigned cached=16;
+        for(unsigned i=0;i<16;i++) if(g_pg.scene_textures[i].texture && g_pg.scene_textures[i].guest_offset==address &&
+            g_pg.scene_textures[i].format==format && g_pg.scene_textures[i].width==uw && g_pg.scene_textures[i].height==uh) { cached=i;break; }
+        if(cached!=16 && g_pg.scene_textures[cached].content_hash==hash) { free(pixels);*result=g_pg.scene_textures[cached].texture;return 0; }
+        unsigned slot=cached;
+        if(slot==16) for(unsigned i=0;i<16;i++) if(!g_pg.scene_textures[i].texture) { slot=i;break; }
+        if(slot==16) {
+            unsigned candidate=(address>>4)&15;
+            for(unsigned probe=0;probe<16 && slot==16;probe++) {
+                unsigned tested=(candidate+probe)&15;
+                IDirect3DTexture8 *tex=g_pg.scene_textures[tested].texture;
+                int in_use=tex==protected_texture;
+                for(unsigned k=0;k<4;k++) if(tex && tex==g_pg_scene_protect[k]) in_use=1;
+                if(!in_use) slot=tested;
+            }
+            if(slot==16) { free(pixels);return PGRAPH_REJECT_LIMIT; }
+        }
+        if(g_pg.scene_textures[slot].texture) {
+            g_pg.scene_textures[slot].texture->lpVtbl->Release(g_pg.scene_textures[slot].texture);
+            g_pg.scene_textures[slot].texture=NULL;
+        }
+        IDirect3DTexture8 *texture=NULL;
+        HRESULT hr=dev->lpVtbl->CreateTexture(dev,uw,uh,1,0,D3DFMT_LIN_A8R8G8B8,0,&texture);
+        if(FAILED(hr) || !texture) { free(pixels);return PGRAPH_REJECT_DEVICE; }
+        D3DLOCKED_RECT lock={0};
+        hr=texture->lpVtbl->LockRect(texture,0,&lock,NULL,0);
+        if(FAILED(hr) || !lock.pBits || lock.Pitch<=0 || (unsigned)lock.Pitch<uw*4u) {
+            texture->lpVtbl->Release(texture);free(pixels);return PGRAPH_REJECT_DEVICE;
+        }
+        for(unsigned y=0;y<uh;y++) memcpy((unsigned char *)lock.pBits+(size_t)y*lock.Pitch,pixels+(size_t)y*uw,uw*4u);
+        hr=texture->lpVtbl->UnlockRect(texture,0);free(pixels);
+        if(FAILED(hr)) { texture->lpVtbl->Release(texture);return PGRAPH_REJECT_DEVICE; }
+        g_pg.scene_textures[slot].guest_offset=address;g_pg.scene_textures[slot].format=format;
+        g_pg.scene_textures[slot].width=uw;g_pg.scene_textures[slot].height=uh;
+        g_pg.scene_textures[slot].content_hash=hash;g_pg.scene_textures[slot].texture=texture;
+        *result=texture;return 0;
+    }
     unsigned width=1u<<((format>>20)&15),height=1u<<((format>>24)&15);
     unsigned block_bytes=color==NV097_SET_TEXTURE_FORMAT_COLOR_L_DXT1_A1R5G5B5 ? 8u : 16u;
     D3DFORMAT host_format;
@@ -1042,7 +1228,10 @@ static int pgraph_upload_scene_texture(IDirect3DDevice8 *dev,unsigned stage,
             unsigned candidate=(address>>4)&15;
             for(unsigned probe=0;probe<16;probe++) {
                 unsigned tested=(candidate+probe)&15;
-                if(g_pg.scene_textures[tested].texture!=protected_texture) {
+                IDirect3DTexture8 *tex=g_pg.scene_textures[tested].texture;
+                int in_use=tex==protected_texture;
+                for(unsigned k=0;k<4;k++) if(tex && tex==g_pg_scene_protect[k]) in_use=1;
+                if(!in_use) {
                     slot=tested;break;
                 }
             }
@@ -1147,6 +1336,11 @@ static void submit_indexed_draw(void) {
         memcpy((void *)g_dah2_pgraph_draw_program_valid[telemetry_slot],g_pg.program_valid,sizeof(g_pg.program_valid));
         memcpy((void *)g_dah2_pgraph_draw_constants[telemetry_slot],g_pg.constants,sizeof(g_pg.constants));
         memcpy((void *)g_dah2_pgraph_draw_constant_valid[telemetry_slot],g_pg.constant_valid,sizeof(g_pg.constant_valid));
+    }
+    for(unsigned s=0;s<4;s++) {
+        g_pg_stage_scale[s][0]=g_pg_stage_scale[s][1]=1.0f;
+        if(profile==PGRAPH_ARRAY_PROFILE_DAH2_SCENE_GENERIC && ((PG_REG(NV097_SET_SHADER_STAGE_PROGRAM)>>(s*5))&31u))
+            pgraph_stage_scale(s,&g_pg_stage_scale[s][0],&g_pg_stage_scale[s][1]);
     }
     unsigned texel_coord_mask=profile==PGRAPH_ARRAY_PROFILE_DAH2_ACCUMULATE4_XRGB ? 15u :
         (profile==PGRAPH_ARRAY_PROFILE_TEXTURED_ARGB ||
@@ -1324,7 +1518,7 @@ static void submit_indexed_draw(void) {
                 for(unsigned j=0;j<3;j++) {
                     promoted[j].z=0.5f;promoted[j].rhw=1.0f;
                     promoted[j].diffuse=0xFFFFFFFFu;promoted[j].specular=0;
-                    promoted[j].u0=promoted[j].v0=promoted[j].u1=promoted[j].v1=0;
+                    promoted[j].u0=promoted[j].v0=promoted[j].u1=promoted[j].v1=promoted[j].u2=promoted[j].v2=promoted[j].u3=promoted[j].v3=0;
                     front[j]=promoted[j];
                 }
                 fprintf(stdout,"[PGRAPH-PROMOTED] area=%.9g xy=(%.3f,%.3f)(%.3f,%.3f)(%.3f,%.3f)\n",
@@ -1404,7 +1598,7 @@ static void submit_indexed_draw(void) {
     IDirect3DDevice8 *dev=xbox_GetD3DDevice();
     if (!dev) { reason=PGRAPH_REJECT_DEVICE;goto rejected; }
     IDirect3DTexture8 *surface_texture=pgraph_surface_texture(PG_REG(NV097_SET_TEXTURE_OFFSET));
-    IDirect3DTexture8 *scene_texture[2]={NULL,NULL};
+    IDirect3DTexture8 *scene_texture[4]={NULL,NULL,NULL,NULL};
     int postprocess_diag=getenv("DAH2_POSTPROCESS_DIAGNOSTIC") &&
         g_pg.stats.frames>=1500u &&
         getenv("DAH2_TEST_WINDOW_HIDDEN") &&
@@ -1430,7 +1624,18 @@ static void submit_indexed_draw(void) {
         if (reason) goto rejected;
         }
     }
-    if(profile>=PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT2 &&
+    if(profile==PGRAPH_ARRAY_PROFILE_DAH2_SCENE_GENERIC) {
+        uint32_t program=PG_REG(NV097_SET_SHADER_STAGE_PROGRAM);
+        memset(g_pg_scene_protect,0,sizeof(g_pg_scene_protect));
+        for(unsigned s=0;s<4;s++) {
+            if(!((program>>(s*5))&31u)) continue;
+            IDirect3DTexture8 *surface=pgraph_surface_texture(PG_REG(NV097_SET_TEXTURE_OFFSET+s*0x40));
+            if(surface) { scene_texture[s]=surface;g_pg_scene_protect[s]=surface;continue; }
+            reason=pgraph_upload_scene_texture(dev,s,NULL,&scene_texture[s]);
+            if(reason) { detail=NV097_SET_TEXTURE_FORMAT+s*0x40;goto rejected; }
+            g_pg_scene_protect[s]=scene_texture[s];
+        }
+    } else if(profile>=PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT2 &&
        profile!=PGRAPH_ARRAY_PROFILE_DAH2_SCENE_UNTEXTURED) {
         reason=pgraph_upload_scene_texture(dev,0,NULL,&scene_texture[0]);
         if(reason) goto rejected;
@@ -1508,7 +1713,7 @@ static void submit_indexed_draw(void) {
         PG_RS(D3DRS_PSCOMBINERCOUNT,control);PG_RS(D3DRS_PSTEXTUREMODES,texture_modes);
         PG_CALL(dev->lpVtbl->SetPixelShader(dev,
             scene_solid_diag && !scene_keep_shader_diag ? 0 : combiner_token));
-        PG_CALL(dev->lpVtbl->SetVertexShader(dev,D3DFVF_XYZRHW|D3DFVF_DIFFUSE|D3DFVF_SPECULAR|D3DFVF_TEX2));
+        PG_CALL(dev->lpVtbl->SetVertexShader(dev,D3DFVF_XYZRHW|D3DFVF_DIFFUSE|D3DFVF_SPECULAR|D3DFVF_TEX4));
     } else {
         PG_CALL(dev->lpVtbl->SetPixelShader(dev,0));
         PG_CALL(dev->lpVtbl->SetVertexShader(dev,D3DFVF_XYZRHW|D3DFVF_DIFFUSE|
@@ -1542,7 +1747,7 @@ static void submit_indexed_draw(void) {
     for(unsigned s=0;s<4;s++) {
         IDirect3DBaseTexture8 *binding=NULL;
         if(profile>=PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT2) {
-            if(s<2) binding=(IDirect3DBaseTexture8 *)scene_texture[s];
+            binding=(IDirect3DBaseTexture8 *)scene_texture[s];
         } else if(profile!=PGRAPH_ARRAY_PROFILE_MOVIE &&
             (s==0 || profile==PGRAPH_ARRAY_PROFILE_DAH2_ACCUMULATE4_XRGB))
             binding=(IDirect3DBaseTexture8 *)(surface_texture ? surface_texture : g_pg.array_texture);
@@ -1584,7 +1789,7 @@ static void submit_indexed_draw(void) {
         PG_TSS(D3DTSS_COLOROP,D3DTOP_MODULATE2X);PG_TSS(D3DTSS_COLORARG1,0);PG_TSS(D3DTSS_COLORARG2,3);
         PG_TSS(D3DTSS_ALPHAOP,D3DTOP_SELECTARG1);PG_TSS(D3DTSS_ALPHAARG1,0);PG_TSS(D3DTSS_ALPHAARG2,0);
     }
-    unsigned sampler_count=profile>=PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT2 ? 2u :
+    unsigned sampler_count=profile==PGRAPH_ARRAY_PROFILE_DAH2_SCENE_GENERIC ? 4u : profile>=PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT2 ? 2u :
         (profile==PGRAPH_ARRAY_PROFILE_DAH2_ACCUMULATE4_XRGB ? 4u : 1u);
     for (unsigned s=0;s<sampler_count;s++) {
         uint32_t address=profile>=PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT2 ?
@@ -1645,6 +1850,14 @@ static void submit_indexed_draw(void) {
     /* A scene strip may be fully rejected by the NV2A near-plane clip.  Xbox
      * treats the resulting zero-primitive submission as a successful no-op;
      * the D3D11 compatibility path rejects it as E_INVALIDARG. */
+    if(profile>=PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT2) {
+        uint32_t wh=PG_REG(NV097_SET_WINDOW_CLIP_HORIZONTAL),wv=PG_REG(NV097_SET_WINDOW_CLIP_VERTICAL);
+        int left=(int)(wh&0xFFFu),right=(int)((wh>>16)&0xFFFu),top=(int)(wv&0xFFFu),bottom=(int)((wv>>16)&0xFFFu);
+        int cw=(int)(g_pg.surface_clip_h>>16),ch=(int)(g_pg.surface_clip_v>>16);
+        if(right>cw) right=cw;
+        if(bottom>ch) bottom=ch;
+        if(left>0 || top>0 || right<cw || bottom<ch) d3d8_states_set_scissor(1,left,top,right>left?right:left,bottom>top?bottom:top);
+    }
     HRESULT draw_result=primitives ? dev->lpVtbl->DrawPrimitiveUP(dev,
         scene_triangle_list || g_pg.draw_mode==5 ? D3DPT_TRIANGLELIST : D3DPT_TRIANGLESTRIP,
         primitives,vertices,(UINT)vertex_stride) : S_OK;
@@ -1658,11 +1871,13 @@ static void submit_indexed_draw(void) {
             (unsigned)draw_result,(unsigned)end_result,primitives,(unsigned)vertex_stride);
         fflush(stdout);
     }
+    d3d8_states_set_scissor(0,0,0,0,0);
     d3d8_shaders_set_texel_coord_mask(0);
     d3d8_shaders_set_fog_from_specular(0);
     d3d8_shaders_set_texture_alpha_one_mask(0);
     PG_CALL(draw_result);PG_CALL(end_result);
     pgraph_record_profile_result(profile,g_pg.index_source,primitives,0);
+    if(profile==PGRAPH_ARRAY_PROFILE_DAH2_SCENE_GENERIC) { g_dah2_pg_generic_draws++;g_dah2_pg_generic_prims+=primitives; }
     pgraph_draw_surface_probe_after();
     if(postprocess_diag)
         pgraph_report_surface(PG_REG(NV097_SET_SURFACE_COLOR_OFFSET),"post-target");

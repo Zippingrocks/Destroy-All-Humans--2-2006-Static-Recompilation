@@ -161,6 +161,7 @@ void    d3d8_states_shutdown(void);
 
 /* Apply current D3D8 render states as D3D11 state objects */
 void    d3d8_states_apply(void);
+void    d3d8_states_set_scissor(int enable, int left, int top, int right, int bottom);
 
 /* Create sampler state from TSS and apply to slot */
 void    d3d8_states_apply_sampler(DWORD stage);

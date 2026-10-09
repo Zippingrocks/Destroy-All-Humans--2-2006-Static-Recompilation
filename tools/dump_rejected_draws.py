@@ -11,10 +11,11 @@ hdr = (pathlib.Path(__file__).resolve().parent.parent / "xboxrecomp/src/nv2a/nv2
 R = {m.group(1): int(m.group(2), 16) for m in re.finditer(r"#\s*define (NV097_[A-Z0-9_]+)\s+(0x[0-9A-Fa-f]+)\s*$", hdr, re.M)}
 rev = collections.defaultdict(list)
 for k, v in R.items(): rev[v].append(k)
-r = Reader(a.pid, suspend=False)
+r = Reader(a.pid, suspend=True)
 tel = r.read(r.base + symbol_rva(a.map, "g_dah2_pgraph_draw_telemetry"), 64 * 48)
 regs = r.read(r.base + symbol_rva(a.map, "g_dah2_pgraph_draw_registers"), 64 * 0x2000)
 cur = struct.unpack("<I", r.read(r.base + symbol_rva(a.map, "g_dah2_pgraph_draw_telemetry_cursor"), 4))[0]
+r.close()  # resume: all three arrays were read while the process was suspended
 names = ["none", "state", "shader", "guest-memory", "vertex-output", "device", "limit", "topology", "legacy-inline"]
 def reg(i, off): return struct.unpack_from("<I", regs, i * 0x2000 + off)[0]
 KEYS = ["NV097_SET_COMBINER_CONTROL", "NV097_SET_SHADER_STAGE_PROGRAM", "NV097_SET_COMBINER_COLOR_ICW", "NV097_SET_COMBINER_COLOR_OCW",
