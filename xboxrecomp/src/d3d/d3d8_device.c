@@ -447,6 +447,13 @@ static HRESULT d3d11_create_device_and_swap_chain(
         return hr;
     }
 
+    {   /* The host window handles fullscreen itself (F11 / Alt+Enter, borderless); stop DXGI from switching display modes. */
+        IDXGIFactory *factory = NULL;
+        if (SUCCEEDED(IDXGISwapChain_GetParent(state->swap_chain, &IID_IDXGIFactory, (void **)&factory)) && factory) {
+            IDXGIFactory_MakeWindowAssociation(factory, pp->hDeviceWindow, DXGI_MWA_NO_ALT_ENTER | DXGI_MWA_NO_WINDOW_CHANGES);
+            IDXGIFactory_Release(factory);
+        }
+    }
     state->hwnd = pp->hDeviceWindow;
     state->width = scd.BufferDesc.Width;
     state->height = scd.BufferDesc.Height;

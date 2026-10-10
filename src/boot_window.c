@@ -414,9 +414,51 @@ static void shell_paint(HDC dc, const RECT *rc)
     }
 }
 
+#define DAH2_WINDOW_TITLE "Destroy All Humans! 2 Make War, Not Love"
+#define DAH2_WINDOW_STYLE (WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN)
+
+static WINDOWPLACEMENT g_windowed_placement = { sizeof(WINDOWPLACEMENT) };
+static BOOL g_borderless_fullscreen;
+
+/* F11 / Alt+Enter: borderless fullscreen on the monitor under the window, back to the framed window on the next press. */
+static void boot_toggle_fullscreen(HWND hwnd)
+{
+    if (!g_borderless_fullscreen) {
+        MONITORINFO mi = { sizeof(mi) };
+        if (!GetWindowPlacement(hwnd, &g_windowed_placement) ||
+            !GetMonitorInfoA(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mi))
+            return;
+        SetWindowLongA(hwnd, GWL_STYLE, (DAH2_WINDOW_STYLE) & ~WS_OVERLAPPEDWINDOW);
+        SetWindowPos(hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+                     mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
+                     SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+        g_borderless_fullscreen = TRUE;
+    } else {
+        SetWindowLongA(hwnd, GWL_STYLE, DAH2_WINDOW_STYLE | WS_VISIBLE);
+        SetWindowPlacement(hwnd, &g_windowed_placement);
+        SetWindowPos(hwnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+        g_borderless_fullscreen = FALSE;
+    }
+}
+
 static LRESULT CALLBACK boot_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     switch (msg) {
+    case WM_GETMINMAXINFO: {
+        /* Smallest window is half the Xbox's 640x480 client area. */
+        MINMAXINFO *mm = (MINMAXINFO *)lp;
+        RECT r = { 0, 0, 320, 240 };
+        AdjustWindowRectEx(&r, DAH2_WINDOW_STYLE, FALSE, WS_EX_APPWINDOW);
+        mm->ptMinTrackSize.x = r.right - r.left;
+        mm->ptMinTrackSize.y = r.bottom - r.top;
+        return 0;
+    }
+    case WM_SYSKEYDOWN:
+        if (wp == VK_RETURN && (lp & (1 << 29))) { boot_toggle_fullscreen(hwnd); return 0; }
+        break;
+    case WM_KEYDOWN:
+        if (wp == VK_F11) { boot_toggle_fullscreen(hwnd); return 0; }
+        break;
     case WM_TIMER:
         if (InterlockedCompareExchange(&g_renderer_owned, 0, 0) == 0 &&
             InterlockedCompareExchange(&g_shell_active, 0, 0) == 0)
@@ -526,14 +568,14 @@ static DWORD WINAPI boot_thread_proc(void *ctx)
     wc.lpszClassName = "DAH2RecompBootWindow";
     wc.hbrBackground = NULL;
     RegisterClassExA(&wc);
-    AdjustWindowRectEx(&desired, WS_POPUP, FALSE, 0);
+    AdjustWindowRectEx(&desired, DAH2_WINDOW_STYLE, FALSE, WS_EX_APPWINDOW);
     window_width = desired.right - desired.left;
     window_height = desired.bottom - desired.top;
     screen_width = GetSystemMetrics(SM_CXSCREEN);
     screen_height = GetSystemMetrics(SM_CYSCREEN);
     g_boot_hwnd = CreateWindowExA(WS_EX_APPWINDOW, wc.lpszClassName,
-        "Destroy All Humans! 2 - Native Recomp",
-        WS_POPUP | WS_VISIBLE,
+        DAH2_WINDOW_TITLE,
+        DAH2_WINDOW_STYLE | WS_VISIBLE,
         (screen_width - window_width) / 2,
         (screen_height - window_height) / 2,
         window_width, window_height,

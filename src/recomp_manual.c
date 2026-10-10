@@ -3096,8 +3096,69 @@ static int dah2_hidden_input_enabled(void)
         const char *hidden = getenv("DAH2_TEST_WINDOW_HIDDEN");
         const char *script = getenv("DAH2_INPUT_SCRIPT");
         cached = hidden && strcmp(hidden, "1") == 0 && script && *script;
+        /* Visible launches get the live adapter: host XInput pad / keyboard behind the same logical Xbox pad. */
+        if (!(hidden && strcmp(hidden, "1") == 0)) cached = 2;
     }
     return cached;
+}
+
+#include "boot_window.h"
+extern unsigned long xbox_InputGetState(unsigned long port, void *state);
+
+/* Fill an Xbox gamepad packet (22 bytes at state+4: buttons u16, analog[8], four int16 sticks) from the first connected
+ * XInput controller, then OR in the keyboard (only while the game window has focus).
+ *   WASD left stick, IJKL right stick, arrows D-pad, Enter Start, Esc Back, Space/E A, Q B, F X, R Y, Z left trigger,
+ *   C right trigger, 1 Black, 2 White, left Shift left-stick click, left Ctrl right-stick click. */
+static void dah2_live_input_fill(unsigned char *state)
+{
+    uint16_t buttons = 0;
+    unsigned char analog[8] = {0};
+    int16_t stick[4] = {0};
+    unsigned port;
+    HWND game = dah2_boot_window_get_hwnd();
+    int focused = game && GetForegroundWindow() == game;
+    for (port = 0; port < 4; ++port) {
+        struct { unsigned long packet; uint16_t buttons; unsigned char analog[8]; int16_t stick[4]; } pad;
+        memset(&pad, 0, sizeof(pad));
+        if (xbox_InputGetState(port, &pad) == 0) {
+            buttons = pad.buttons;
+            memcpy(analog, pad.analog, 8);
+            memcpy(stick, pad.stick, sizeof(stick));
+            break;
+        }
+    }
+    if (focused) {
+#define K(vk) ((GetAsyncKeyState(vk) & 0x8000) != 0)
+        int16_t x, y;
+        if (K(VK_UP)) buttons |= 0x0001;
+        if (K(VK_DOWN)) buttons |= 0x0002;
+        if (K(VK_LEFT)) buttons |= 0x0004;
+        if (K(VK_RIGHT)) buttons |= 0x0008;
+        if (K(VK_RETURN)) buttons |= 0x0010;
+        if (K(VK_ESCAPE)) buttons |= 0x0020;
+        if (K(VK_LSHIFT)) buttons |= 0x0040;
+        if (K(VK_LCONTROL)) buttons |= 0x0080;
+        if (K(VK_SPACE) || K('E')) analog[0] = 255;
+        if (K('Q')) analog[1] = 255;
+        if (K('F')) analog[2] = 255;
+        if (K('R')) analog[3] = 255;
+        if (K('1')) analog[4] = 255;
+        if (K('2')) analog[5] = 255;
+        if (K('Z')) analog[6] = 255;
+        if (K('C')) analog[7] = 255;
+        x = K('A') == K('D') ? 0 : (K('A') ? -32768 : 32767);
+        y = K('S') == K('W') ? 0 : (K('S') ? -32768 : 32767);
+        if (x && y) { x = x < 0 ? -23170 : 23170; y = y < 0 ? -23170 : 23170; }
+        if (x || y) { stick[0] = x; stick[1] = y; }
+        x = K('J') == K('L') ? 0 : (K('J') ? -32768 : 32767);
+        y = K('K') == K('I') ? 0 : (K('K') ? -32768 : 32767);
+        if (x && y) { x = x < 0 ? -23170 : 23170; y = y < 0 ? -23170 : 23170; }
+        if (x || y) { stick[2] = x; stick[3] = y; }
+#undef K
+    }
+    memcpy(state + 4, &buttons, sizeof(buttons));
+    memcpy(state + 6, analog, 8);
+    memcpy(state + 14, stick, sizeof(stick));
 }
 
 static void dah2_scripted_xinput_get_state(void)
@@ -3110,6 +3171,7 @@ static void dah2_scripted_xinput_get_state(void)
     uint32_t output = MEM32(esp + 8u);
     unsigned i;
 
+    if (!loaded && dah2_hidden_input_enabled() == 2) loaded = 1;
     if (!loaded) {
         const char *path = getenv("DAH2_INPUT_SCRIPT");
         FILE *file = path ? fopen(path, "r") : NULL;
@@ -3159,6 +3221,10 @@ static void dah2_scripted_xinput_get_state(void)
         }
     }
 
+    if (dah2_hidden_input_enabled() == 2) {
+        dah2_live_input_fill(state);
+        event_count = 0;
+    }
     for (i = 0; i < event_count; ++i) {
         const Dah2InputEvent *event = &events[i];
         uint16_t buttons;
