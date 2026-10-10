@@ -1,0 +1,6 @@
+# Title Start retried every ~300 polls until the game leaves the title, then a few movie-skip Starts
+1100 10 0010 0 0 0 0 0 0
+1400 10 0010 0 0 0 0 0 0
+1700 10 0010 0 0 0 0 0 0
+2000 10 0010 0 0 0 0 0 0
+2300 10 0010 0 0 0 0 0 0

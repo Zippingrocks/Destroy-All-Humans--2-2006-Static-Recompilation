@@ -818,6 +818,58 @@ static IDirect3DTexture8 *pgraph_surface_texture(uint32_t guest_offset) {
 
 static void pgraph_report_surface(uint32_t guest_offset,const char *label);
 
+/* The guest clears depth/stencil inside a rectangle (the radar disc, HUD panels) while the rest of the world depth must survive.
+ * D3D11 cannot clear a sub-rect of a DSV, so draw a depth-writing (and stencil-replacing) quad under a scissor instead.
+ * Returns 1 if handled; 0 means the clear covers the whole target (or the device refused) and the full clear applies. */
+static int pgraph_clear_depth_rect(uint32_t flags,float depth,unsigned stencil) {
+    unsigned xmin=g_pg.clear_rect_h&0xFFFFu,xmax=g_pg.clear_rect_h>>16;
+    unsigned ymin=g_pg.clear_rect_v&0xFFFFu,ymax=g_pg.clear_rect_v>>16;
+    int slot=pgraph_surface_index(PG_REG(NV097_SET_SURFACE_COLOR_OFFSET));
+    IDirect3DDevice8 *dev=xbox_GetD3DDevice();
+    if(slot<0 || !dev || getenv("DAH2_NO_RECT_CLEAR")) return 0;
+    unsigned sw=g_pg.array_surfaces[slot].width,sh=g_pg.array_surfaces[slot].height;
+    if(xmax<xmin || ymax<ymin) return 1;
+    if(xmin==0 && ymin==0 && xmax+1>=sw && ymax+1>=sh) return 0;
+    if(xmax+1>sw) xmax=sw-1;
+    if(ymax+1>sh) ymax=sh-1;
+    if(pgraph_bind_array_target(dev)) return 0;
+    D3DVIEWPORT8 viewport={0,0,sw,sh,0,1};
+    struct { float x,y,z,rhw; DWORD color; } quad[4]={
+        {(float)xmin,(float)ymin,depth,1.0f,0},{(float)(xmax+1),(float)ymin,depth,1.0f,0},
+        {(float)xmin,(float)(ymax+1),depth,1.0f,0},{(float)(xmax+1),(float)(ymax+1),depth,1.0f,0}};
+    dev->lpVtbl->SetViewport(dev,&viewport);
+    dev->lpVtbl->SetPixelShader(dev,0);
+    dev->lpVtbl->SetVertexShader(dev,D3DFVF_XYZRHW|D3DFVF_DIFFUSE);
+    for(unsigned s=0;s<4;s++) dev->lpVtbl->SetTexture(dev,s,NULL);
+    dev->lpVtbl->SetRenderState(dev,D3DRS_LIGHTING,FALSE);
+    dev->lpVtbl->SetRenderState(dev,D3DRS_FOGENABLE,FALSE);
+    dev->lpVtbl->SetRenderState(dev,D3DRS_CULLMODE,D3DCULL_NONE);
+    dev->lpVtbl->SetRenderState(dev,D3DRS_ALPHATESTENABLE,FALSE);
+    dev->lpVtbl->SetRenderState(dev,D3DRS_ALPHABLENDENABLE,FALSE);
+    dev->lpVtbl->SetRenderState(dev,D3DRS_COLORWRITEENABLE,0);
+    dev->lpVtbl->SetRenderState(dev,D3DRS_ZENABLE,TRUE);
+    dev->lpVtbl->SetRenderState(dev,D3DRS_ZFUNC,8 /* D3DCMP_ALWAYS */);
+    dev->lpVtbl->SetRenderState(dev,D3DRS_ZWRITEENABLE,(flags&1)!=0);
+    dev->lpVtbl->SetRenderState(dev,D3DRS_STENCILENABLE,(flags&2)!=0);
+    if(flags&2) {
+        dev->lpVtbl->SetRenderState(dev,D3DRS_STENCILFUNC,8);
+        dev->lpVtbl->SetRenderState(dev,D3DRS_STENCILREF,stencil&255u);
+        dev->lpVtbl->SetRenderState(dev,D3DRS_STENCILMASK,255u);
+        dev->lpVtbl->SetRenderState(dev,D3DRS_STENCILWRITEMASK,255u);
+        dev->lpVtbl->SetRenderState(dev,D3DRS_STENCILFAIL,3);
+        dev->lpVtbl->SetRenderState(dev,D3DRS_STENCILZFAIL,3);
+        dev->lpVtbl->SetRenderState(dev,D3DRS_STENCILPASS,3 /* D3DSTENCILOP_REPLACE */);
+    }
+    d3d8_states_set_scissor(1,(int)xmin,(int)ymin,(int)xmax+1,(int)ymax+1);
+    if(SUCCEEDED(dev->lpVtbl->BeginScene(dev))) {
+        dev->lpVtbl->DrawPrimitiveUP(dev,D3DPT_TRIANGLESTRIP,2,quad,(UINT)sizeof(quad[0]));
+        dev->lpVtbl->EndScene(dev);
+    }
+    d3d8_states_set_scissor(0,0,0,0,0);
+    dev->lpVtbl->SetRenderState(dev,D3DRS_STENCILENABLE,FALSE);
+    return 1;
+}
+
 static void pgraph_clear_array_target(uint32_t flags,uint32_t color) {
     if(flags&1) g_pg.pending_scene_depth_replay=1;
     int slot=pgraph_surface_index(PG_REG(NV097_SET_SURFACE_COLOR_OFFSET));
@@ -846,6 +898,12 @@ static void pgraph_clear_array_target(uint32_t flags,uint32_t color) {
     }
     if(getenv("DAH2_SURFACE_TIMELINE_DIAGNOSTIC") && getenv("DAH2_TEST_WINDOW_HIDDEN"))
         pgraph_report_surface(PG_REG(NV097_SET_SURFACE_COLOR_OFFSET),"clear-before");
+    { static int dump_lo=-2,dump_hi=-2;
+      if(dump_lo==-2) { const char *e=getenv("DAH2_DRAW_DUMP"); dump_lo=dump_hi=-1; if(e) sscanf(e,"%d,%d",&dump_lo,&dump_hi); }
+      if(dump_lo>=0 && (int)g_pg.stats.frames>=dump_lo && (int)g_pg.stats.frames<=dump_hi) {
+          fprintf(stdout,"[PGRAPH-CLR] f=%u flags=%02X packed=%08X rectH=%08X rectV=%08X tgt=%08X" "\n",g_pg.stats.frames,flags,
+              PG_REG(NV097_SET_ZSTENCIL_CLEAR_VALUE),g_pg.clear_rect_h,g_pg.clear_rect_v,PG_REG(NV097_SET_SURFACE_COLOR_OFFSET));
+          fflush(stdout); } }
     ID3D11DeviceContext *context=d3d8_GetD3D11Context();
     if (flags&0xF0) {
         float rgba[4]={((color>>16)&255)/255.0f,((color>>8)&255)/255.0f,
@@ -866,6 +924,11 @@ static void pgraph_clear_array_target(uint32_t flags,uint32_t color) {
         }
         if (flags&1) clear_flags|=D3D11_CLEAR_DEPTH;
         if (flags&2) clear_flags|=D3D11_CLEAR_STENCIL;
+        if (pgraph_clear_depth_rect(flags&3u,clear_depth,clear_stencil)) {
+            if(getenv("DAH2_SURFACE_TIMELINE_DIAGNOSTIC") && getenv("DAH2_TEST_WINDOW_HIDDEN"))
+                pgraph_report_surface(PG_REG(NV097_SET_SURFACE_COLOR_OFFSET),"clear-after");
+            return;
+        }
         ID3D11DeviceContext_ClearDepthStencilView(context,g_pg.array_surfaces[slot].dsv,
             clear_flags,clear_depth,clear_stencil);
         int depth_slot=pgraph_depth_index(PG_REG(NV097_SET_SURFACE_ZETA_OFFSET),
@@ -1874,7 +1937,32 @@ static void submit_indexed_draw(void) {
             }
             fprintf(stdout,"\n");fflush(stdout);postprocess_state_reports++;
         }
-    }    pgraph_draw_surface_probe_before(profile);
+    }
+    {   /* DAH2_DRAW_DUMP=<first>,<last>: one line of state per accepted draw in that frame window */
+        static int dump_lo=-2,dump_hi=-2;
+        if(dump_lo==-2) { const char *e=getenv("DAH2_DRAW_DUMP"); dump_lo=dump_hi=-1; if(e) sscanf(e,"%d,%d",&dump_lo,&dump_hi); }
+        if(dump_lo>=0 && (int)g_pg.stats.frames>=dump_lo && (int)g_pg.stats.frames<=dump_hi) {
+            fprintf(stdout,"[PGRAPH-DRAW] f=%u prof=%u n=%u tgt=%08X tex0=%08X z=%d zf=%X zmask=%X st=%08X stf=%X/%X/%X sto=%X/%X/%X al=%d af=%X ar=%X bl=%d bs=%X bd=%X cm=%08X cull=%d ctl0=%08X wc=%08X/%08X sc=%08X/%08X bx=%.0f..%.0f by=%.0f..%.0f""%s",
+                g_pg.stats.frames,profile,g_pg.index_count,PG_REG(NV097_SET_SURFACE_COLOR_OFFSET),PG_REG(NV097_SET_TEXTURE_OFFSET),
+                g_pg.depth_test,PG_REG(NV097_SET_DEPTH_FUNC),PG_REG(NV097_SET_DEPTH_MASK),PG_REG(NV097_SET_STENCIL_TEST_ENABLE),
+                PG_REG(NV097_SET_STENCIL_FUNC),PG_REG(NV097_SET_STENCIL_FUNC_REF),PG_REG(NV097_SET_STENCIL_FUNC_MASK),
+                PG_REG(NV097_SET_STENCIL_OP_FAIL),PG_REG(NV097_SET_STENCIL_OP_ZFAIL),PG_REG(NV097_SET_STENCIL_OP_ZPASS),
+                g_pg.alpha_test,PG_REG(NV097_SET_ALPHA_FUNC),PG_REG(NV097_SET_ALPHA_REF),g_pg.blend_enable,g_pg.blend_sfactor,g_pg.blend_dfactor,
+                g_pg.color_mask,g_pg.cull_enable,PG_REG(NV097_SET_CONTROL0),PG_REG(NV097_SET_WINDOW_CLIP_HORIZONTAL),PG_REG(NV097_SET_WINDOW_CLIP_VERTICAL),
+                g_pg.surface_clip_h,g_pg.surface_clip_v,scene_min_x,scene_max_x,scene_min_y,scene_max_y,"\n");
+            fprintf(stdout,"   wclip type=%u:",PG_REG(NV097_SET_WINDOW_CLIP_TYPE));
+            for(unsigned r=0;r<8;r++) fprintf(stdout," %08X/%08X",PG_REG(NV097_SET_WINDOW_CLIP_HORIZONTAL+r*4),PG_REG(NV097_SET_WINDOW_CLIP_VERTICAL+r*4));
+            fprintf(stdout,"\n");
+            if(profile>=PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT2 && g_pg.index_count<=12) {
+                const PgraphSceneVertex *sv=(const PgraphSceneVertex *)vertices;
+                unsigned nv=scene_triangle_list ? scene_triangle_vertex_count : g_pg.index_count;
+                for(unsigned i=0;i<nv && i<12;i++)
+                    fprintf(stdout,"   v%u: %.1f,%.1f z=%.5f rhw=%.5f d=%08X uv=%.3f,%.3f\n",i,sv[i].x,sv[i].y,sv[i].z,sv[i].rhw,sv[i].diffuse,sv[i].u0,sv[i].v0);
+            }
+            fflush(stdout);
+        }
+    }
+    pgraph_draw_surface_probe_before(profile);
     PG_CALL(dev->lpVtbl->BeginScene(dev));
     d3d8_shaders_set_texel_coord_mask(texel_coord_mask);
     d3d8_shaders_set_fog_from_specular(profile>=PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT2);
