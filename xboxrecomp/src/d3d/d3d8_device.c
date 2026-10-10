@@ -270,6 +270,21 @@ static void d3d8_capture_backbuffer_if_requested(unsigned long long present)
     ID3D11Texture2D *backbuffer = NULL;
     HRESULT hr;
     BOOL selected_now = FALSE;
+    static char trigger_path[260];
+    static int trigger_checked;
+    if (!trigger_checked) {
+        trigger_checked = 1;
+        if (GetEnvironmentVariableA("DAH2_CAPTURE_TRIGGER", trigger_path, sizeof(trigger_path)) >= sizeof(trigger_path)) trigger_path[0] = 0;
+    }
+    if (trigger_path[0] && (present % 15ull) == 0ull && GetFileAttributesA(trigger_path) != INVALID_FILE_ATTRIBUTES) {
+        /* DAH2_CAPTURE_TRIGGER=<file>: creating the file captures the next checked present (then the file is removed) */
+        DeleteFileA(trigger_path);
+        if (SUCCEEDED(IDXGISwapChain_GetBuffer(g_device_state.swap_chain, 0, &IID_ID3D11Texture2D, (void **)&backbuffer))) {
+            d3d8_capture_texture(g_device_state.d3d11_device, g_device_state.d3d11_context, backbuffer, present);
+            ID3D11Texture2D_Release(backbuffer);
+            backbuffer = NULL;
+        }
+    }
     if (!initialized) {
         initialized = TRUE;
         size = GetEnvironmentVariableA("DAH2_CAPTURE_PRESENT", setting, sizeof(setting));

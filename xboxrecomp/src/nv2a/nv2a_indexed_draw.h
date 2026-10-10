@@ -241,6 +241,15 @@ static int pgraph_dah2_scene_generic(void) {
     return 1;
 }
 
+/* The hand-made title bloom profiles (SUBTRACT / ACCUMULATE4) ignored the combiners' "shift right 1" output mapping and therefore
+ * blurred twice as bright as retail.  They now run through the generic combiner path; DAH2_LEGACY_POSTPROCESS=1 restores them. */
+static int pgraph_legacy_post(void) {
+    static int legacy=-1;
+    if(legacy<0) legacy=getenv("DAH2_LEGACY_POSTPROCESS")!=NULL;
+    return legacy;
+}
+static int pgraph_dah2_scene_generic(void);
+
 static unsigned pgraph_array_profile(void) {
     if(pgraph_dah2_scene_lit4()) return PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT4;
     if(pgraph_dah2_scene_lit2()) return PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT2;
@@ -296,7 +305,8 @@ static unsigned pgraph_array_profile(void) {
         PG_REG(NV097_SET_TEXTURE_CONTROL0)==0x4003FFC0 &&
         PG_REG(NV097_SET_TEXTURE_ADDRESS)==0x10303 &&
         PG_REG(NV097_SET_TEXTURE_FILTER)==0x02023F01)
-        return PGRAPH_ARRAY_PROFILE_DAH2_SUBTRACT_XRGB;
+        return pgraph_legacy_post() ? PGRAPH_ARRAY_PROFILE_DAH2_SUBTRACT_XRGB :
+            (pgraph_dah2_scene_generic() ? PGRAPH_ARRAY_PROFILE_DAH2_SCENE_GENERIC : PGRAPH_ARRAY_PROFILE_NONE);
     /* Four jittered samples of the current 320x240 title surface.  The first
      * two combiner stages form half-weighted pairs with factor0=0x404040;
      * stage two adds those pair results.  Sequential saturated multiply-add
@@ -335,7 +345,8 @@ static unsigned pgraph_array_profile(void) {
                 PG_REG(NV097_SET_TEXTURE_IMAGE_RECT+d)!=0x014000F0)
                 return PGRAPH_ARRAY_PROFILE_NONE;
         }
-        return PGRAPH_ARRAY_PROFILE_DAH2_ACCUMULATE4_XRGB;
+        return pgraph_legacy_post() ? PGRAPH_ARRAY_PROFILE_DAH2_ACCUMULATE4_XRGB :
+            (pgraph_dah2_scene_generic() ? PGRAPH_ARRAY_PROFILE_DAH2_SCENE_GENERIC : PGRAPH_ARRAY_PROFILE_NONE);
     }
     /* Two-stage Bink presentation pass.  Stage 0 writes
      * r0.rgb=clamp(2*v0.rgb), stage 1 writes r0.a=v0.b, and the final
