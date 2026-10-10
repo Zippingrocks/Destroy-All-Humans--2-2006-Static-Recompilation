@@ -568,7 +568,7 @@ int dah2_test_window_hidden(void)
     return (int)v;
 }
 
-static void dah2_frame_cap_30hz(void)
+static void dah2_frame_cap_60hz(void)
 {
     static LARGE_INTEGER s_freq;
     static LARGE_INTEGER s_next;
@@ -587,7 +587,7 @@ static void dah2_frame_cap_30hz(void)
                                          CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
                                          TIMER_ALL_ACCESS);
     }
-    period = s_freq.QuadPart / 30;
+    period = s_freq.QuadPart / 60;
     s_next.QuadPart += period;
     QueryPerformanceCounter(&now);
     if (now.QuadPart < s_next.QuadPart) {
@@ -638,9 +638,9 @@ void dah2_guest_gpu_present(uint32_t guest_device)
     }
 
     g_dah2_present_thread_id = (LONG)GetCurrentThreadId();
-    /* The 30 Hz limiter now sits between flush and swap (see below) so the
-     * flip itself lands on a fixed deadline; commit cost no longer shows up
-     * as flip-to-flip jitter. */
+    /* Retail advances its simulation and swap counter at 60 Hz. Keep the
+     * limiter between flush and swap so commit cost is part of that budget,
+     * rather than appearing as flip-to-flip jitter. */
     g_dah2_present_phase = 2;
     AcquireSRWLockExclusive(&g_bridge.lock);
 
@@ -650,7 +650,7 @@ void dah2_guest_gpu_present(uint32_t guest_device)
         if (_n <= 20 || (_n % 1000) == 0)
             DAH2_TRACE_FPRINTF(stderr, "[DAH2-GPU] present: guest_device span invalid (call #%ld)\n", _n);
         ReleaseSRWLockExclusive(&g_bridge.lock);
-        dah2_frame_cap_30hz();
+        dah2_frame_cap_60hz();
         return;
     }
 
@@ -673,7 +673,7 @@ void dah2_guest_gpu_present(uint32_t guest_device)
         QueryPerformanceCounter(&qpc_mark);
         after_flush = qpc_mark.QuadPart;
         g_dah2_present_phase = 1;
-        dah2_frame_cap_30hz();
+        dah2_frame_cap_60hz();
         QueryPerformanceCounter(&qpc_mark);
         after_cap = qpc_mark.QuadPart;
         g_dah2_present_phase = 4;
@@ -697,7 +697,7 @@ void dah2_guest_gpu_present(uint32_t guest_device)
         /* No swap to align to: pace the commit itself. */
         QueryPerformanceCounter(&qpc_mark);
         after_flush = qpc_mark.QuadPart;
-        dah2_frame_cap_30hz();
+        dah2_frame_cap_60hz();
         QueryPerformanceCounter(&qpc_mark);
         after_cap = after_swap = qpc_mark.QuadPart;
     }

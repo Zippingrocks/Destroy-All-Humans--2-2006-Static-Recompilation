@@ -452,10 +452,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     printf("=== Destroy All Humans! 2 - Static Recompilation ===\n");
     dah2_boot_window_start(hInstance);
-    /* Normal launch stays on the 60 Hz menu until Enter.  --autoplay is a
-       deterministic bring-up path used by the cadence probe: it runs the
-       menu for five seconds, a complete 30 Hz cutscene, then 30 Hz Crypto
-       gameplay until the window is closed. */
+    /* --autoplay only affects the explicitly enabled placeholder shell. */
     dah2_boot_window_set_shell_autoplay(lpCmdLine && strstr(lpCmdLine, "--autoplay") != NULL);
     dah2_boot_window_set_real_menu_probe(TRUE);
     fprintf(stderr, "[REAL-MENU] translated lifecycle owns the window\n");

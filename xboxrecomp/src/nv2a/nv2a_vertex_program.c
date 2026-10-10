@@ -3,6 +3,14 @@
 #include <math.h>
 #include <string.h>
 
+#if defined(_MSC_VER)
+#define NV2A_FORCEINLINE __forceinline
+#elif defined(__GNUC__) || defined(__clang__)
+#define NV2A_FORCEINLINE inline __attribute__((always_inline))
+#else
+#define NV2A_FORCEINLINE inline
+#endif
+
 volatile int nv2a_vp_last_error_slot=-1;
 volatile int nv2a_vp_last_error_source=-1;
 volatile int nv2a_vp_last_error_constant=-1;
@@ -126,11 +134,11 @@ NV2AVPStatus nv2a_vp_prepare_mov(const uint32_t *program,unsigned slots,
     out->status=NV2A_VP_MISSING_FINAL;return out->status;
 }
 
-static void masked_store(float dest[4], const float value[4], unsigned mask) {
+static NV2A_FORCEINLINE void masked_store(float dest[4], const float value[4], unsigned mask) {
     for (unsigned c=0;c<4;c++) if (mask & (8u>>c)) dest[c]=value[c];
 }
 
-static void output_store(NV2AVertexResult *r,unsigned output,const float value[4],unsigned mask) {
+static NV2A_FORCEINLINE void output_store(NV2AVertexResult *r,unsigned output,const float value[4],unsigned mask) {
     if (output==5) {
         unsigned dst=0;
         for (unsigned c=0;c<4;c++) if (mask&(8u>>c)) r->output[output][dst++]=value[c];
@@ -141,7 +149,7 @@ static void output_store(NV2AVertexResult *r,unsigned output,const float value[4
     }
 }
 
-static int fetch_source(const NV2AVPInstruction *d,unsigned slot,unsigned which,int a0,
+static NV2A_FORCEINLINE int fetch_source(const NV2AVPInstruction *d,unsigned slot,unsigned which,int a0,
     const float attributes[NV2A_VP_ATTRIBUTES][4],const float constants[NV2A_VP_CONSTANTS][4],
     float temporaries[12][4],const NV2AVertexResult *result,float value[4]) {
     const NV2AVPSource *s=&d->source[which]; const float *base=NULL;
@@ -166,9 +174,9 @@ static int fetch_source(const NV2AVPInstruction *d,unsigned slot,unsigned which,
     return 1;
 }
 
-static float nv_mul(float a,float b) { return (a==0.0f || b==0.0f) ? 0.0f : a*b; }
+static NV2A_FORCEINLINE float nv_mul(float a,float b) { return (a==0.0f || b==0.0f) ? 0.0f : a*b; }
 
-static void mac_value(unsigned op,const float a[4],const float b[4],const float c[4],float out[4]) {
+static NV2A_FORCEINLINE void mac_value(unsigned op,const float a[4],const float b[4],const float c[4],float out[4]) {
     float scalar;
     switch(op) {
     case 1: memcpy(out,a,16); break;

@@ -4,6 +4,7 @@
 #include <mmsystem.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /*
@@ -669,6 +670,7 @@ static void shell_log_rate(LONG stage, LONG frame, double actual_hz,
 
 void dah2_pc_shell_run(void)
 {
+    const char *placeholder_setting = getenv("DAH2_PLACEHOLDER_SHELL");
     LARGE_INTEGER frequency;
     LARGE_INTEGER now;
     LONGLONG next_tick;
@@ -687,6 +689,13 @@ void dah2_pc_shell_run(void)
     BOOL priority_raised = FALSE;
     MMRESULT timer_period_result;
 
+    if (!placeholder_setting || placeholder_setting[0] != '1' ||
+        placeholder_setting[1] != '\0') {
+        fprintf(stderr, "[PLACEHOLDER-SHELL] disabled; translated guest output remains authoritative\n");
+        fflush(stderr);
+        return;
+    }
+
     if (!g_boot_hwnd || !IsWindow(g_boot_hwnd))
         return;
 
@@ -695,7 +704,7 @@ void dah2_pc_shell_run(void)
     InterlockedExchange(&g_shell_quit, 0);
     InterlockedExchange(&g_shell_active, 1);
     dah2_boot_window_set_renderer_owned(FALSE);
-    dah2_boot_window_set_status("Main menu ready — 60 FPS pacing active");
+    dah2_boot_window_set_status("Placeholder diagnostic - not guest gameplay");
 
     /*
      * The translated title keeps several worker threads busy during startup.

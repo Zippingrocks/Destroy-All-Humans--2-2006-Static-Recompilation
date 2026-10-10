@@ -1,10 +1,12 @@
-"""Print the guest-function call chain from a run's stdout.log [CRASH] block (resolves NATIVE-FRAME RVAs via the map).
+"""Print the guest-function call chain from a run's latest crash/exception block.
    py -3 tools/resolve_crash.py RUN_DIR"""
 import bisect, re, sys
 from pathlib import Path
 run = Path(sys.argv[1])
 log = (run / "stdout.log").read_text(errors="replace")
-i = log.find("[CRASH]")
+i = max(log.rfind("[CRASH]"), log.rfind("[EXCEPTION]"))
+if i < 0:
+    raise SystemExit("no [CRASH] or [EXCEPTION] block in stdout.log")
 blk = log[i:i + 6000]
 print("\n".join(blk.splitlines()[:6]))
 rows = []; started = False
@@ -16,7 +18,8 @@ for l in (run / "dah2_recomp.map").read_text(errors="replace").splitlines():
         try: rows.append((int(p[2], 16) - 0x140000000, p[1]))
         except ValueError: pass
 rows.sort(); keys = [r[0] for r in rows]
-frames = [int(m.group(1), 16) for m in re.finditer(r"NATIVE-FRAME\] \d+ RVA=([0-9A-F]+)", blk)]
+frames = [int(m.group(1), 16) for m in re.finditer(
+    r"(?:NATIVE|EXCEPTION)-FRAME\] \d+ RVA=([0-9A-F]+)", blk)]
 print("call chain (innermost first):")
 last = None
 for r in frames[:40]:

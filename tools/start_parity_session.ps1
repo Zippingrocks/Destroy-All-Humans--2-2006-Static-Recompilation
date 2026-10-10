@@ -263,7 +263,8 @@ if ($kind -eq 'xemu') {
     foreach ($key in @('DAH2_TEST_WINDOW_HIDDEN', 'DAH2_INPUT_SCRIPT',
         'DAH2_CAPTURE_PRESENT', 'DAH2_PARITY_TIMING_MEMORY',
         'DAH2_PARITY_STATE_MEMORY', 'DAH2_DRAW_STATE_MEMORY',
-        'DAH2_METHOD_HIST', 'DAH2_TIMING_LINK_WATCH')) {
+        'DAH2_METHOD_HIST', 'DAH2_TIMING_LINK_WATCH',
+        'DAH2_DSOUND_TRACE', 'DAH2_UNCAPPED_DIAGNOSTIC')) {
         if ($Environment.ContainsKey($key)) {
             $record.explicitEnvironment[$key] = [string]$Environment[$key]
         }

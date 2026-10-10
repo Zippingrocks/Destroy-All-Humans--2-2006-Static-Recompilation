@@ -1,0 +1,22 @@
+# Enter gameplay, then exercise movement plus each pressure-sensitive Xbox
+# action channel in short isolated pulses.  This is a hidden diagnostic input
+# schedule for deterministic sound-object construction, not a player preset.
+# Fields: start duration buttons a0 a1 lx ly rx ry a2 a3 a4 a5 a6 a7
+1100 10 0010 0 0 0 0 0 0 0 0 0 0 0 0
+1950 10 0010 0 0 0 0 0 0 0 0 0 0 0 0
+3000 900 0000 0 0 0 30000 0 0 0 0 0 0 0 0
+3100 8 0000 255 0 0 0 0 0 0 0 0 0 0 0
+3200 8 0000 0 255 0 0 0 0 0 0 0 0 0 0
+3300 8 0000 0 0 0 0 0 0 255 0 0 0 0 0
+3400 8 0000 0 0 0 0 0 0 0 255 0 0 0 0
+3500 8 0000 0 0 0 0 0 0 0 0 255 0 0 0
+3600 8 0000 0 0 0 0 0 0 0 0 0 255 0 0
+3700 8 0000 0 0 0 0 0 0 0 0 0 0 255 0
+3800 8 0000 0 0 0 0 0 0 0 0 0 0 0 255
+4000 60 0040 0 0 0 0 0 0 0 0 0 0 0 0
+4100 60 0080 0 0 0 0 0 0 0 0 0 0 0 0
+4200 8 0100 0 0 0 0 0 0 0 0 0 0 0 0
+4300 8 0200 0 0 0 0 0 0 0 0 0 0 0 0
+4400 8 0001 0 0 0 0 0 0 0 0 0 0 0 0
+4500 8 0002 0 0 0 0 0 0 0 0 0 0 0 0
+4600 120 0000 0 0 30000 30000 0 0 0 0 0 0 0 255

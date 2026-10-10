@@ -3108,26 +3108,24 @@ static int dah2_hidden_input_enabled(void)
 #include "boot_window.h"
 extern unsigned long xbox_InputGetState(unsigned long port, void *state);
 
-/* Fill an Xbox gamepad packet (22 bytes at state+4: buttons u16, analog[8], four int16 sticks) from the first connected
+/* Fill an Xbox gamepad packet (22 bytes at state+4: buttons u16, analog[8], four int16 sticks) from the requested
  * XInput controller, then OR in the keyboard (only while the game window has focus).
  *   WASD left stick, IJKL right stick, arrows D-pad, Enter Start, Esc Back, Space/E A, Q B, F X, R Y, Z left trigger,
  *   C right trigger, 1 Black, 2 White, left Shift left-stick click, left Ctrl right-stick click. */
-static void dah2_live_input_fill(unsigned char *state)
+static void dah2_live_input_fill(unsigned char *state, unsigned port)
 {
     uint16_t buttons = 0;
     unsigned char analog[8] = {0};
     int16_t stick[4] = {0};
-    unsigned port;
     HWND game = dah2_boot_window_get_hwnd();
     int focused = game && GetForegroundWindow() == game;
-    for (port = 0; port < 4; ++port) {
+    if (port < 4u) {
         struct { unsigned long packet; uint16_t buttons; unsigned char analog[8]; int16_t stick[4]; } pad;
         memset(&pad, 0, sizeof(pad));
         if (xbox_InputGetState(port, &pad) == 0) {
             buttons = pad.buttons;
             memcpy(analog, pad.analog, 8);
             memcpy(stick, pad.stick, sizeof(stick));
-            break;
         }
     }
     if (focused) {
@@ -3171,10 +3169,17 @@ static void dah2_scripted_xinput_get_state(void)
     static unsigned char previous_payload[18];
     static int loaded, have_previous;
     unsigned char state[22] = {0};
+    uint32_t handle = MEM32(esp + 4u);
+    unsigned port = handle - DAH2_INPUT_HANDLE_BASE;
     uint32_t output = MEM32(esp + 8u);
     uint32_t caller_delta_bits = MEM32(esp + 0x38u);
     unsigned i;
 
+    if (port >= 4u) {
+        eax = 0x48Fu; /* ERROR_DEVICE_NOT_CONNECTED */
+        esp += 12u;   /* ret 8 */
+        return;
+    }
     if (!loaded && dah2_hidden_input_enabled() == 2) loaded = 1;
     if (!loaded) {
         const char *path = getenv("DAH2_INPUT_SCRIPT");
@@ -3226,7 +3231,7 @@ static void dah2_scripted_xinput_get_state(void)
     }
 
     if (dah2_hidden_input_enabled() == 2) {
-        dah2_live_input_fill(state);
+        dah2_live_input_fill(state, port);
         event_count = 0;
     }
     for (i = 0; i < event_count; ++i) {
@@ -6150,6 +6155,31 @@ loc_000B3634: ;
 #undef HI8
 #undef SET_LO8
 
+extern uint32_t xbox_kernel_fast_wait_mutant(uint32_t token);
+extern uint32_t xbox_kernel_fast_release_mutant(uint32_t token);
+
+/* Retail Bink's lock callbacks are only thin adapters around a mutant stored
+ * at callback_object+4. Calling through the lifted XDK wrapper and generic
+ * kernel-thunk dispatcher for every entropy block dominated movie time.
+ * Preserve the exact object/null tests, success result, and stdcall cleanup
+ * while invoking the same typed mutant bridge directly. */
+void sub_002842F0(void)
+{
+    uint32_t object = *manual_mem32(g_esp + 8u);
+    uint32_t token = object ? *manual_mem32(object + 4u) : 0u;
+    g_eax = token ? (xbox_kernel_fast_wait_mutant(token) == 0u) : 1u;
+    g_esp += 12u; /* ret 8 */
+}
+
+void sub_002843B0(void)
+{
+    uint32_t object = *manual_mem32(g_esp + 8u);
+    uint32_t token = object ? *manual_mem32(object + 4u) : 0u;
+    if (token)
+        g_eax = xbox_kernel_fast_release_mutant(token);
+    g_esp += 12u; /* ret 8 */
+}
+
 static __forceinline uint32_t manual_bink_mmx_clamp(uint16_t value)
 {
     int32_t sum = (int16_t)value + 0x7F00;
@@ -6310,6 +6340,8 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
     if (xbox_va == 0x00296297) return sub_00296297;
     if (xbox_va == 0x00296353) return sub_00296353;
     if (xbox_va == 0x00296375) return sub_00296375;
+    if (xbox_va == 0x002842F0) return sub_002842F0;
+    if (xbox_va == 0x002843B0) return sub_002843B0;
     if (xbox_va == 0x0028DDC0) return sub_0028DDC0;
     if (xbox_va == 0x0015FF70) return traced_sub_0015FF70;
     if (xbox_va == 0x001602D0) return traced_sub_001602D0;

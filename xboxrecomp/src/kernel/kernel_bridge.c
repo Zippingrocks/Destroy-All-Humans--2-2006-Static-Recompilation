@@ -500,6 +500,7 @@ static void bridge_PsCreateSystemThreadEx(void)
  * referenced by tagged 32-bit tokens. */
 static void   bridge_write_handle(uint32_t handle_va, HANDLE h);
 static HANDLE bridge_take_handle(uint32_t token);
+static int    bridge_close_mutant(uint32_t token);
 
 static void bridge_NtClose(void)
 {
@@ -512,9 +513,11 @@ static void bridge_NtClose(void)
 
     /* Close real handles but skip fake/synthetic ones */
     if (raw_handle && raw_handle != 0xDEAD0001u && raw_handle != 0xBEEF0010u) {
-        HANDLE h = bridge_take_handle(raw_handle);
-        if (h && h != INVALID_HANDLE_VALUE)
-            CloseHandle(h);
+        if (!bridge_close_mutant(raw_handle)) {
+            HANDLE h = bridge_take_handle(raw_handle);
+            if (h && h != INVALID_HANDLE_VALUE)
+                CloseHandle(h);
+        }
     }
     g_eax = 0; /* STATUS_SUCCESS */
 }
@@ -1056,6 +1059,8 @@ static void bridge_KeWaitForSingleObject(void)
 }
 
 static HANDLE bridge_resolve_handle(uint32_t token);
+static NTSTATUS bridge_wait_mutant_token(uint32_t token,
+                                         PLARGE_INTEGER timeout, int *handled);
 
 /* ── NtWaitForSingleObject (ordinal 233) ─────────────────── */
 /*
@@ -1066,10 +1071,17 @@ static HANDLE bridge_resolve_handle(uint32_t token);
  */
 static void bridge_NtWaitForSingleObject(void)
 {
-    HANDLE   handle      = bridge_resolve_handle(STACK_ARG(0));
+    uint32_t token       = STACK_ARG(0);
+    HANDLE handle;
     uint32_t alertable   = STACK_ARG(1);
     uint32_t timeout_ptr = STACK_ARG(2);
     PLARGE_INTEGER native_timeout = (PLARGE_INTEGER)XBOX_TO_NATIVE(timeout_ptr);
+    int mutant_handled = 0;
+    NTSTATUS mutant_status = bridge_wait_mutant_token(
+        token, native_timeout, &mutant_handled);
+
+    if (mutant_handled) { g_eax = (uint32_t)mutant_status; return; }
+    handle = bridge_resolve_handle(token);
     LARGE_INTEGER fallback_timeout;
 
     /* Same bounded-INFINITE-wait treatment as bridge_NtWaitForSingleObjectEx
@@ -1142,11 +1154,18 @@ static HANDLE bridge_resolve_handle(uint32_t token);
 
 static void bridge_NtWaitForSingleObjectEx(void)
 {
-    HANDLE   handle      = bridge_resolve_handle(STACK_ARG(0));
+    uint32_t token       = STACK_ARG(0);
+    HANDLE handle;
     uint32_t wait_mode   = STACK_ARG(1);
     uint32_t alertable   = STACK_ARG(2);
     uint32_t timeout_ptr = STACK_ARG(3);
     PLARGE_INTEGER native_timeout = (PLARGE_INTEGER)XBOX_TO_NATIVE(timeout_ptr);
+    int mutant_handled = 0;
+    NTSTATUS mutant_status = bridge_wait_mutant_token(
+        token, native_timeout, &mutant_handled);
+
+    if (mutant_handled) { g_eax = (uint32_t)mutant_status; return; }
+    handle = bridge_resolve_handle(token);
 
     static int logged = 0;
     if (logged++ < 20) {
@@ -1645,6 +1664,15 @@ static void bridge_write_iostatus(uint32_t ios_va, NTSTATUS status, uint32_t inf
 #define BRIDGE_HANDLE_MAX  16384
 static HANDLE s_handle_table[BRIDGE_HANDLE_MAX];
 
+#define BRIDGE_HANDLE_KIND_NATIVE 0u
+#define BRIDGE_HANDLE_KIND_MUTANT 1u
+typedef struct BridgeMutant {
+    CRITICAL_SECTION lock;
+    DWORD owner_thread;
+    LONG recursion;
+} BridgeMutant;
+static uint8_t s_handle_kind[BRIDGE_HANDLE_MAX];
+
 static uint32_t bridge_handle_token(HANDLE h)
 {
     int i;
@@ -1675,7 +1703,170 @@ static void bridge_write_handle(uint32_t handle_va, HANDLE h)
         }
     }
 }
+/* Xbox mutants are recursive ownership locks. A Win32 kernel mutex is
+ * semantically close but extremely expensive in DAH2's Bink inner loop, which
+ * acquires and releases an uncontended mutant thousands of times per frame.
+ * CRITICAL_SECTION preserves recursive/cross-thread blocking semantics while
+ * keeping the uncontended path in user mode. */
+static BridgeMutant *bridge_mutant_from_token(uint32_t token)
+{
+    uint32_t index;
+    if ((token & 0xFF000000u) != BRIDGE_HANDLE_TAG) return NULL;
+    index = token & BRIDGE_HANDLE_MASK;
+    if (!index || index >= BRIDGE_HANDLE_MAX ||
+        s_handle_kind[index] != BRIDGE_HANDLE_KIND_MUTANT)
+        return NULL;
+    return (BridgeMutant *)s_handle_table[index];
+}
 
+static void bridge_note_mutant_acquire(BridgeMutant *mutant)
+{
+    DWORD thread = GetCurrentThreadId();
+    if (mutant->owner_thread == thread)
+        ++mutant->recursion;
+    else {
+        mutant->owner_thread = thread;
+        mutant->recursion = 1;
+    }
+}
+
+static DWORD bridge_mutant_timeout_ms(PLARGE_INTEGER timeout)
+{
+    LONGLONG ticks;
+    if (!timeout) return INFINITE;
+    ticks = timeout->QuadPart;
+    if (ticks == 0) return 0;
+    if (ticks < 0) {
+        ULONGLONG relative = (ULONGLONG)(-(ticks + 1)) + 1u;
+        ULONGLONG ms = (relative + 9999u) / 10000u;
+        return ms >= INFINITE ? INFINITE - 1u : (DWORD)ms;
+    }
+    {
+        FILETIME file_time;
+        ULARGE_INTEGER now;
+        ULONGLONG delta, ms;
+        GetSystemTimeAsFileTime(&file_time);
+        now.LowPart = file_time.dwLowDateTime;
+        now.HighPart = file_time.dwHighDateTime;
+        if ((ULONGLONG)ticks <= now.QuadPart) return 0;
+        delta = (ULONGLONG)ticks - now.QuadPart;
+        ms = (delta + 9999u) / 10000u;
+        return ms >= INFINITE ? INFINITE - 1u : (DWORD)ms;
+    }
+}
+
+static NTSTATUS bridge_wait_mutant_token(uint32_t token,
+                                         PLARGE_INTEGER timeout, int *handled)
+{
+    BridgeMutant *mutant = bridge_mutant_from_token(token);
+    DWORD wait_ms;
+    ULONGLONG started;
+
+    *handled = mutant != NULL;
+    if (!mutant) return STATUS_SUCCESS;
+    wait_ms = bridge_mutant_timeout_ms(timeout);
+    if (wait_ms == INFINITE) {
+        EnterCriticalSection(&mutant->lock);
+        bridge_note_mutant_acquire(mutant);
+        return STATUS_SUCCESS;
+    }
+
+    started = GetTickCount64();
+    do {
+        if (TryEnterCriticalSection(&mutant->lock)) {
+            bridge_note_mutant_acquire(mutant);
+            return STATUS_SUCCESS;
+        }
+        if (GetTickCount64() - started >= wait_ms) return STATUS_TIMEOUT;
+        Sleep(1);
+    } while (1);
+}
+
+static NTSTATUS bridge_release_mutant_token(uint32_t token,
+                                            LONG *previous, int *handled)
+{
+    BridgeMutant *mutant = bridge_mutant_from_token(token);
+    DWORD thread = GetCurrentThreadId();
+
+    *handled = mutant != NULL;
+    if (!mutant) return STATUS_SUCCESS;
+    if (mutant->owner_thread != thread || mutant->recursion <= 0)
+        return STATUS_MUTANT_NOT_OWNED;
+    if (previous) *previous = 0;
+    if (--mutant->recursion == 0) mutant->owner_thread = 0;
+    LeaveCriticalSection(&mutant->lock);
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS bridge_create_mutant(uint32_t handle_va, BOOLEAN initial_owner)
+{
+    BridgeMutant *mutant;
+    uint32_t token, index;
+
+    if (!handle_va) return STATUS_INVALID_PARAMETER;
+    mutant = (BridgeMutant *)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+                                       sizeof(*mutant));
+    if (!mutant) return STATUS_INSUFFICIENT_RESOURCES;
+    InitializeCriticalSection(&mutant->lock);
+    if (initial_owner) {
+        EnterCriticalSection(&mutant->lock);
+        mutant->owner_thread = GetCurrentThreadId();
+        mutant->recursion = 1;
+    }
+
+    token = bridge_handle_token((HANDLE)mutant);
+    if (!token) {
+        if (initial_owner) LeaveCriticalSection(&mutant->lock);
+        DeleteCriticalSection(&mutant->lock);
+        HeapFree(GetProcessHeap(), 0, mutant);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    index = token & BRIDGE_HANDLE_MASK;
+    s_handle_kind[index] = BRIDGE_HANDLE_KIND_MUTANT;
+    BRIDGE_MEM32(handle_va) = token;
+    return STATUS_SUCCESS;
+}
+
+static int bridge_close_mutant(uint32_t token)
+{
+    uint32_t index;
+    BridgeMutant *mutant = bridge_mutant_from_token(token);
+    if (!mutant) return 0;
+    index = token & BRIDGE_HANDLE_MASK;
+    s_handle_table[index] = NULL;
+    s_handle_kind[index] = BRIDGE_HANDLE_KIND_NATIVE;
+    /* Titles must release ownership before closing the last handle. Preserve
+     * safety if a bad caller violates that contract rather than freeing a
+     * lock that another host thread could still be waiting on. */
+    if (mutant->recursion != 0) return 1;
+    DeleteCriticalSection(&mutant->lock);
+    HeapFree(GetProcessHeap(), 0, mutant);
+    return 1;
+}
+
+
+
+/* Narrow exports for manually recompiled title wrappers that otherwise spend
+ * more time constructing an XDK call frame and redispatching the kernel thunk
+ * than they do acquiring the uncontended lock. */
+uint32_t xbox_kernel_fast_wait_mutant(uint32_t token)
+{
+    int handled = 0;
+    NTSTATUS status = bridge_wait_mutant_token(token, NULL, &handled);
+    if (!handled)
+        status = xbox_NtWaitForSingleObjectEx(
+            bridge_resolve_handle(token), KernelMode, FALSE, NULL);
+    return (uint32_t)status;
+}
+
+uint32_t xbox_kernel_fast_release_mutant(uint32_t token)
+{
+    int handled = 0;
+    NTSTATUS status = bridge_release_mutant_token(token, NULL, &handled);
+    if (!handled)
+        status = xbox_NtReleaseMutant(bridge_resolve_handle(token), NULL);
+    return (uint32_t)status;
+}
 /* Resolve a 32-bit Xbox handle slot back to a native HANDLE. */
 static HANDLE bridge_read_handle(uint32_t va)
 {
@@ -2806,26 +2997,23 @@ static void bridge_NtQueryVirtualMemory(void)
 static void bridge_NtCreateMutant(void)
 {
     uint32_t handle_va = STACK_ARG(0);
-    XBOX_OBJECT_ATTRIBUTES oa;
-    XBOX_ANSI_STRING name;
-    HANDLE h = NULL;
-    NTSTATUS st;
-
-    bridge_build_oa(STACK_ARG(1), &oa, &name);
-    st = xbox_NtCreateMutant(&h, STACK_ARG(1) ? &oa : NULL,
-                             (BOOLEAN)STACK_ARG(2));
-    if (st >= 0 && handle_va) bridge_write_handle(handle_va, h);
-    g_eax = (uint32_t)st;
+    g_eax = (uint32_t)bridge_create_mutant(
+        handle_va, (BOOLEAN)STACK_ARG(2));
 }
 
 /* ── NtReleaseMutant (ordinal 221, 2 args) ─────────────────────── */
 static void bridge_NtReleaseMutant(void)
 {
     uint32_t previous_va = STACK_ARG(1);
+    uint32_t token = STACK_ARG(0);
     LONG previous = 0;
-    NTSTATUS st = xbox_NtReleaseMutant(
-        bridge_resolve_handle(STACK_ARG(0)),
-        previous_va ? &previous : NULL);
+    int mutant_handled = 0;
+    NTSTATUS st = bridge_release_mutant_token(
+        token, previous_va ? &previous : NULL, &mutant_handled);
+
+    if (!mutant_handled)
+        st = xbox_NtReleaseMutant(bridge_resolve_handle(token),
+                                  previous_va ? &previous : NULL);
 
     if (previous_va)
         BRIDGE_MEM32(previous_va) = (uint32_t)previous;

@@ -16,18 +16,102 @@ static int dah2_parity_read(uint32_t address, uint32_t *value)
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 }
 
-static void dah2_parity_words(uint32_t address, unsigned count)
+static void dah2_parity_words_file(FILE *stream, uint32_t address,
+                                   unsigned count)
 {
     unsigned i;
-    fprintf(stderr, "[");
+    fprintf(stream, "[");
     for (i = 0; i < count; ++i) {
         uint32_t value;
-        if (i) fprintf(stderr, ",");
+        if (i) fprintf(stream, ",");
         if (dah2_parity_read(address + i * 4u, &value))
-            fprintf(stderr, "\"0x%08x\"", value);
-        else fprintf(stderr, "null");
+            fprintf(stream, "\"0x%08x\"", value);
+        else fprintf(stream, "null");
     }
-    fprintf(stderr, "]");
+    fprintf(stream, "]");
+}
+
+static void dah2_parity_words(uint32_t address, unsigned count)
+{
+    dah2_parity_words_file(stderr, address, count);
+}
+
+typedef struct Dah2DsoundLifetimeEvent {
+    LONG sequence;
+    const char *stage;
+    uint32_t address;
+    uint32_t object;
+    uint32_t owner;
+    uint32_t vtable;
+    uint32_t refcount;
+    DWORD thread;
+} Dah2DsoundLifetimeEvent;
+
+#define DAH2_DSOUND_LIFETIME_CAPACITY 256u
+static Dah2DsoundLifetimeEvent
+    dah2_dsound_lifetime[DAH2_DSOUND_LIFETIME_CAPACITY];
+static volatile LONG dah2_dsound_lifetime_sequence;
+
+static int dah2_dsound_trace_enabled(void)
+{
+    static volatile LONG cached;
+    LONG value = InterlockedCompareExchange(&cached, 0, 0);
+    char flag[8];
+    DWORD length;
+    if (value) return value > 0;
+    length = GetEnvironmentVariableA("DAH2_DSOUND_TRACE", flag, sizeof(flag));
+    value = (length == 1 && flag[0] == '1') ? 1 : -1;
+    InterlockedCompareExchange(&cached, value, 0);
+    return value > 0;
+}
+
+static void dah2_parity_dsound_lifetime(const char *stage, uint32_t address,
+                                        uint32_t object, uint32_t owner)
+{
+    LONG sequence;
+    Dah2DsoundLifetimeEvent *event;
+    uint32_t vtable = 0, refcount = 0;
+    if (!dah2_dsound_trace_enabled()) return;
+    if (object) {
+        dah2_parity_read(object, &vtable);
+        dah2_parity_read(object + 4u, &refcount);
+    }
+    sequence = InterlockedIncrement(&dah2_dsound_lifetime_sequence);
+    event = &dah2_dsound_lifetime[(unsigned)(sequence - 1) &
+                                  (DAH2_DSOUND_LIFETIME_CAPACITY - 1u)];
+    event->stage = stage;
+    event->address = address;
+    event->object = object;
+    event->owner = owner;
+    event->vtable = vtable;
+    event->refcount = refcount;
+    event->thread = GetCurrentThreadId();
+    InterlockedExchange(&event->sequence, sequence);
+}
+
+static void dah2_parity_dsound_lifetime_dump(FILE *stream)
+{
+    LONG newest = InterlockedCompareExchange(&dah2_dsound_lifetime_sequence, 0, 0);
+    LONG first = newest > (LONG)DAH2_DSOUND_LIFETIME_CAPACITY
+                   ? newest - (LONG)DAH2_DSOUND_LIFETIME_CAPACITY + 1 : 1;
+    LONG sequence;
+    int emitted = 0;
+    fprintf(stream, "[");
+    for (sequence = first; sequence <= newest; ++sequence) {
+        Dah2DsoundLifetimeEvent *event =
+            &dah2_dsound_lifetime[(unsigned)(sequence - 1) &
+                                   (DAH2_DSOUND_LIFETIME_CAPACITY - 1u)];
+        if (event->sequence != sequence) continue;
+        if (emitted++) fprintf(stream, ",");
+        fprintf(stream,
+                "{\"sequence\":%ld,\"stage\":\"%s\",\"address\":\"0x%08x\","
+                "\"thread\":%lu,\"object\":\"0x%08x\",\"owner\":\"0x%08x\","
+                "\"vtable\":\"0x%08x\",\"refcount\":%u}",
+                sequence, event->stage, event->address,
+                (unsigned long)event->thread, event->object, event->owner,
+                event->vtable, event->refcount);
+    }
+    fprintf(stream, "]");
 }
 
 /* Temporary, opt-in construction snapshots used to locate the first Bink
@@ -56,20 +140,36 @@ static void dah2_parity_dsound_object(const char *stage, uint32_t address,
                                       uint32_t object, uint32_t target)
 {
     static volatile LONG emitted;
+    static volatile LONG suspicious_emitted;
     char flag[8];
-    DWORD length = GetEnvironmentVariableA("DAH2_PARITY_TRACE", flag, sizeof(flag));
-    if (length != 1 || flag[0] != '1' || !object ||
-        InterlockedIncrement(&emitted) > 24) return;
-    _lock_file(stderr);
-    fprintf(stderr, "[PARITY-DSOUND] {\"stage\":\"%s\",\"address\":\"0x%08x\",\"object\":\"0x%08x\",\"target\":\"0x%08x\",\"registers\":{\"eax\":\"0x%08x\",\"ecx\":\"0x%08x\",\"edx\":\"0x%08x\",\"ebx\":\"0x%08x\",\"esi\":\"0x%08x\",\"edi\":\"0x%08x\",\"esp\":\"0x%08x\"},\"object_head\":",
-            stage, address, object, target, g_eax, g_ecx, g_edx,
-            g_ebx, g_esi, g_edi, g_esp);
-    dah2_parity_words(object, 32);
-    fprintf(stderr, ",\"stack\":");
-    dah2_parity_words(g_esp, 12);
-    fprintf(stderr, "}\n");
-    fflush(stderr);
-    _unlock_file(stderr);
+    LONG ordinal;
+    int suspicious;
+    DWORD length = GetEnvironmentVariableA("DAH2_DSOUND_TRACE", flag, sizeof(flag));
+    if (length != 1 || flag[0] != '1') {
+        length = GetEnvironmentVariableA("DAH2_PARITY_TRACE", flag, sizeof(flag));
+        if (length != 1 || flag[0] != '1') return;
+    }
+    ordinal = InterlockedIncrement(&emitted);
+    suspicious = !object ||
+                 !((object >= 0x00010000u && object < 0x04000000u) ||
+                   (object >= 0x80000000u && object < 0x88000000u));
+    if (ordinal > 24 && !suspicious) return;
+    if (suspicious && InterlockedIncrement(&suspicious_emitted) > 64) return;
+    _lock_file(stdout);
+    fprintf(stdout, "[PARITY-DSOUND] {\"ordinal\":%ld,\"suspicious\":%s,\"stage\":\"%s\",\"address\":\"0x%08x\",\"thread\":%lu,\"object\":\"0x%08x\",\"target\":\"0x%08x\",\"registers\":{\"eax\":\"0x%08x\",\"ecx\":\"0x%08x\",\"edx\":\"0x%08x\",\"ebx\":\"0x%08x\",\"esi\":\"0x%08x\",\"edi\":\"0x%08x\",\"esp\":\"0x%08x\"},\"object_head\":",
+            ordinal, suspicious ? "true" : "false", stage, address,
+            (unsigned long)GetCurrentThreadId(), object, target, g_eax, g_ecx,
+            g_edx, g_ebx, g_esi, g_edi, g_esp);
+    if (object) dah2_parity_words_file(stdout, object, 32); else fprintf(stdout, "null");
+    fprintf(stdout, ",\"stack\":");
+    dah2_parity_words_file(stdout, g_esp, 12);
+    if (suspicious) {
+        fprintf(stdout, ",\"lifetime\":");
+        dah2_parity_dsound_lifetime_dump(stdout);
+    }
+    fprintf(stdout, "}\n");
+    fflush(stdout);
+    _unlock_file(stdout);
 }
 
 static void dah2_parity_bink_audio(const char *stage, uint32_t address)

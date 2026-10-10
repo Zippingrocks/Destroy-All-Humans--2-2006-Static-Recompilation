@@ -37,6 +37,11 @@ static NV2AInlineArrayLayout g_pg_inline_layout;
 
 static unsigned pgraph_array_profile(void);
 
+static int pgraph_verbose_diagnostics_enabled(void) {
+    const char *setting=getenv("DAH2_PGRAPH_DIAGNOSTIC");
+    return setting && setting[0] && setting[0]!='0';
+}
+
 static void pgraph_reject_draw(unsigned reason, uint32_t detail) {
     if(pgraph_profile_counters_enabled())
         pgraph_record_profile_result(pgraph_array_profile(),g_pg.index_source,0,1);
@@ -1629,7 +1634,7 @@ static void submit_indexed_draw(void) {
         int isolated_front=isolated_count && isolated_count[0] &&
             strtoul(isolated_count,NULL,10)==g_pg.index_count &&
             isolated_front_reports++<8u;
-        if(front_reports++<8u || isolated_front) {
+        if(pgraph_verbose_diagnostics_enabled() && (front_reports++<8u || isolated_front)) {
             fprintf(stdout,"[PGRAPH-FRONT-TRIANGLES] count=%u positive=%u nonpositive=%u w=%.9g..%.9g z=%.9g..%.9g triangles=%u/%u nondegenerate=%u areaSign=%u/%u maxArea=%.9g\n",
                 g_pg.index_count,positive,nonpositive,min_w,max_w,min_z,max_z,
                 scene_triangle_vertex_count/3u,g_pg.index_count-2u,nondegenerate,
@@ -1654,14 +1659,14 @@ static void submit_indexed_draw(void) {
         memcpy(&bits,&scene_max_y,4);g_dah2_pgraph_draw_memory_failures[telemetry_slot][9]=bits;
         g_dah2_pgraph_draw_memory_failures[telemetry_slot][10]=scene_extreme_index;
         static unsigned scene_bounds_reports;
-        if(g_pg.stats.frames>=1350 && scene_bounds_reports<256){
+        if(pgraph_verbose_diagnostics_enabled() && g_pg.stats.frames>=1350 && scene_bounds_reports<256){
             fprintf(stdout,"[PGRAPH-SCENE-BOUNDS] frame=%u profile=%u count=%u x=%.3f..%.3f y=%.3f..%.3f extremeIndex=%u\n",
                 g_pg.stats.frames,profile,g_pg.index_count,scene_min_x,scene_max_x,
                 scene_min_y,scene_max_y,scene_extreme_index);
             fflush(stdout);scene_bounds_reports++;
         }
         static unsigned scene_state_reports;
-        if(g_pg.stats.frames>=1348 && g_pg.stats.frames<=1350 && scene_state_reports<64){
+        if(pgraph_verbose_diagnostics_enabled() && g_pg.stats.frames>=1348 && g_pg.stats.frames<=1350 && scene_state_reports<64){
             fprintf(stdout,"[PGRAPH-SCENE-STATE] frame=%u count=%u target=%08X zeta=%08X depthTest=%d depthFunc=%08X depthMask=%08X\n",
                 g_pg.stats.frames,g_pg.index_count,PG_REG(NV097_SET_SURFACE_COLOR_OFFSET),
                 PG_REG(NV097_SET_SURFACE_ZETA_OFFSET),g_pg.depth_test,

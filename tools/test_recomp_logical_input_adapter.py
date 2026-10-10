@@ -34,7 +34,9 @@ scripted = re.search(
     re.M | re.S,
 ).group()
 assert "XInputGetState(" not in scripted and "GetAsyncKeyState(" not in scripted
-assert "dah2_live_input_fill(state);" in scripted
+assert "dah2_live_input_fill(state, port);" in scripted
+assert "unsigned port = handle - DAH2_INPUT_HANDLE_BASE;" in scripted
+assert "if (port >= 4u)" in scripted and "eax = 0x48Fu" in scripted
 assert "xbox_InputGetState(port, &pad)" in code
 assert "GetAsyncKeyState(vk)" in code
 assert "SwitchDesktop" not in code and "SetThreadDesktop" not in code

@@ -12,6 +12,7 @@ ALIASES = (("ja", "jnbe"), ("jae", "jnb", "jnc"), ("jb", "jnae", "jc"),
            ("jbe", "jna"), ("je", "jz"), ("jne", "jnz"), ("jp",), ("jnp",))
 ALIASES = tuple(tuple(alias for alias in group if alias in COND_MAP) for group in ALIASES)
 functions, mutants, references = [], [], []
+expressions = []
 for name in NAMES:
     prefix = "66" if name.endswith("sd") else ""
     opcode = "2e" if name.startswith("u") else "2f"
@@ -23,6 +24,7 @@ for name in NAMES:
             for alias in aliases:
                 expression, _ = _make_condition(alias, name, instruction.operands)
                 identifier = f"condition_{name}_{int(memory)}_{alias}"
+                expressions.append(expression)
                 functions.append(f"static int {identifier}(void) {{ return {expression}; }}")
                 a = "xmm0.f[0]"
                 b = "MEMD(eax)" if memory and name.endswith("sd") else "MEMF(eax)" if memory else "xmm1.f[0]"
@@ -45,6 +47,7 @@ native = r'''
 typedef union {float f[4];double d[2];uint32_t u[4];uint64_t q[2];} Xmm;
 static Xmm xmm0,xmm1,memory_rhs;
 static uint32_t eax=0x12345678;
+static int g_fp_cmp;
 #define MEMF(address) memory_rhs.f[0]
 #define MEMD(address) memory_rhs.d[0]
 FUNCTIONS
@@ -81,6 +84,7 @@ int main(void) {
             memory_rhs=xmm1;Xmm before0=xmm0,before1=xmm1,beforemem=memory_rhs;
             unsigned flags=op>=2 ? ((unsigned(*)(double,double))code)(xmm0.d[0],xmm1.d[0]) :
                 ((unsigned(*)(float,float))code)(xmm0.f[0],xmm1.f[0]);
+            g_fp_cmp=(flags&4)?2:(flags&64)?0:(flags&1)?-1:1;
             for(unsigned memory=0;memory<2;memory++)for(unsigned alias=0;alias<ALIAS_COUNT;alias++) {
                 unsigned actual=!!conditions[op*2+memory][alias]();
                 if(actual!=expected(flags,groups[alias])) {
@@ -97,6 +101,10 @@ int main(void) {
     printf("PASS: %u native SSE branch cases; 13 supported aliases, 4 compares, register/memory, NaN/Inf/signed-zero/subnormal/double-lane; input bits preserved\n",cases);return 0;
 }
 '''
+for expression in expressions:
+    assert "g_fp_cmp" in expression, expression
+    assert "xmm" not in expression and "MEM" not in expression and "isnan" not in expression, expression
+print("PASS: emitted SSE branches consume the instruction-time comparison snapshot")
 native = native.replace("TABLE", ",".join(table)).replace("GROUPS", ",".join(groups)).replace("REFERENCES", ",".join(references)).replace("ALIAS_COUNT", str(len(groups)))
 with tempfile.TemporaryDirectory(prefix="dah2-sse-branch-") as temporary:
     directory = Path(temporary)

@@ -56,7 +56,7 @@ def main() -> None:
     renderer = (NV2A / "nv2a_indexed_draw.h").read_text(encoding="utf-8")
     vertex_type = re.search(
         r"typedef struct \{\s*float x,y,z,rhw;uint32_t diffuse,specular;"
-        r"float u0,v0,u1,v1;\s*\} PgraphSceneVertex;", renderer
+        r"float u0,v0,u1,v1,u2,v2,u3,v3;\s*\} PgraphSceneVertex;", renderer
     )
     assert vertex_type
     pack_start = renderer.index("static int pgraph_pack_scene_vertex(")
@@ -86,6 +86,8 @@ static uint32_t clip_bits;
 #define PG_REG(method) clip_bits
 static float u2f(uint32_t b){float f;memcpy(&f,&b,4);return f;}
 VERTEX_TYPE
+static float g_pg_stage_scale[4][2]={{1,1},{1,1},{1,1},{1,1}};
+static float pgraph_fog_factor(float coord){(void)coord;return 1.0f;}
 PACKER
 typedef struct Fixture {const uint32_t *p,*c;unsigned start;uint32_t clip,count;} Fixture;
 DECLARATIONS

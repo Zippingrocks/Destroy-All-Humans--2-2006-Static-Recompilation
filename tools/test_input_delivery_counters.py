@@ -7,6 +7,9 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 source = (ROOT / "src/recomp_manual.c").read_text(encoding="utf-8")
+input_source = (ROOT / "xboxrecomp/src/input/xinput_device.c").read_text(encoding="utf-8")
+assert "XBOX_BUTTON_BLACK] =\n        (xi_state.Gamepad.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER)" in input_source
+assert "XBOX_BUTTON_WHITE] =\n        (xi_state.Gamepad.wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER)" in input_source
 event = re.search(r"typedef struct Dah2InputEvent \{.*?\} Dah2InputEvent;", source, re.S).group()
 body = re.search(r"static void dah2_scripted_xinput_get_state\(void\)\n\{.*?^\}", source, re.M | re.S).group()
 counter_lines = [
@@ -32,10 +35,11 @@ static uint32_t eax,ecx,edx,esp,ebx,esi,edi,ebp;
 volatile uint32_t g_dah2_input_polls,g_dah2_input_latest_packet,g_dah2_input_latest_buttons;
 volatile uint32_t g_dah2_input_latest_delta_bits;
 volatile int16_t g_dah2_input_latest_sticks[4];
+#define DAH2_INPUT_HANDLE_BASE 0xDA220000u
 #define MEM32(a) (*(uint32_t *)(memory+(uint32_t)(a)))
 static unsigned char *manual_mem8(uint32_t a) {CHECK(a<sizeof(memory));return memory+a;}
 static int dah2_hidden_input_enabled(void) {return 1;}
-static void dah2_live_input_fill(unsigned char *state) {(void)state;}
+static void dah2_live_input_fill(unsigned char *state, unsigned port) {(void)state;(void)port;}
 '''
 suffix = r'''
 int main(void) {
@@ -67,7 +71,17 @@ int main(void) {
         CHECK(g_dah2_input_latest_delta_bits==0x3D072B02);
         CHECK(memcmp((const void *)g_dah2_input_latest_sticks,wanted+14,8)==0);
     }
-    puts("PASS: eight native polls; exact timing/buttons/axes telemetry, RET8 ABI, RAM/GPRs unchanged, invalid output remains unwritten");
+    {
+        const uint32_t initial=0x10000,output=0x20000;
+        memset(memory,0xCD,sizeof(memory));
+        eax=0xAABBCCDD;esp=initial;MEM32(esp)=0x10295D;MEM32(esp+4)=0xBAD00000;MEM32(esp+8)=output;
+        memcpy(expected,memory,sizeof(memory));
+        dah2_scripted_xinput_get_state();
+        CHECK(eax==0x48F && esp==initial+12);
+        CHECK(memcmp(memory,expected,sizeof(memory))==0);
+        CHECK(g_dah2_input_polls==8 && g_dah2_input_latest_packet==5);
+    }
+    puts("PASS: eight exact Xbox polls plus invalid-handle rejection; timing/buttons/axes, port ABI, RET8, RAM/GPRs");
     return 0;
 }
 '''

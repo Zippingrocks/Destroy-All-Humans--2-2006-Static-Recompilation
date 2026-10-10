@@ -363,40 +363,27 @@ def _make_condition(jcc, flag_setter, flag_ops):
     if lhs is None:
         return None
 
-    # ── comiss/ucomiss: float comparison, sets CF/ZF/PF ──
+    # ── comiss/ucomiss: consume the comparison snapshot ──
     if flag_setter in ("comiss", "comisd", "ucomiss", "ucomisd"):
-        def _sse_op(op):
-            if op.type == "reg" and op.reg and op.reg.startswith("xmm"):
-                lane = "d" if flag_setter.endswith("sd") else "f"
-                return f"{op.reg}.{lane}[0]"
-            elif op.type == "reg":
-                return op.reg
-            elif op.type == "mem":
-                if flag_setter.endswith("sd"):
-                    return f"MEMD({_fmt_mem(op)})"
-                return f"MEMF({_fmt_mem(op)})"
-            return _fmt_operand_read(op)
-        a = _sse_op(flag_ops[0]) if len(flag_ops) >= 1 else "0.0f"
-        b = _sse_op(flag_ops[1]) if len(flag_ops) >= 2 else "0.0f"
-        # COMISS/UCOMISS set CF=ZF=PF=1 for unordered operands; C's
-        # relational/equality operators alone do not implement those flags.
-        unordered = f"(isnan({a}) || isnan({b}))"
+        # The compare emitter stores -1/0/1/2 (less/equal/greater/unordered)
+        # in g_fp_cmp at the instruction boundary. Re-reading operands here
+        # is incorrect when an intervening POP changes an effective address.
         if jcc in ("ja", "jnbe"):
-            return f"({a} > {b})", desc
+            return "(g_fp_cmp == 1)", desc
         if jcc in ("jae", "jnb", "jnc"):
-            return f"({a} >= {b})", desc
+            return "(g_fp_cmp == 0 || g_fp_cmp == 1)", desc
         if jcc in ("jb", "jnae", "jc"):
-            return f"(({a} < {b}) || {unordered})", desc
+            return "(g_fp_cmp == -1 || g_fp_cmp == 2)", desc
         if jcc in ("jbe", "jna"):
-            return f"(({a} <= {b}) || {unordered})", desc
+            return "(g_fp_cmp != 1)", desc
         if jcc in ("je", "jz"):
-            return f"(({a} == {b}) || {unordered})", desc
+            return "(g_fp_cmp == 0 || g_fp_cmp == 2)", desc
         if jcc in ("jne", "jnz"):
-            return f"(({a} != {b}) && !{unordered})", desc
+            return "(g_fp_cmp == -1 || g_fp_cmp == 1)", desc
         if jcc == "jp":
-            return unordered, desc
+            return "(g_fp_cmp == 2)", desc
         if jcc == "jnp":
-            return f"(!{unordered})", desc
+            return "(g_fp_cmp != 2)", desc
         return None
 
     # SF is the sign bit of the result at the OPERAND's width, not at 32 bits.
