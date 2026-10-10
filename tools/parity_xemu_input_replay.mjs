@@ -44,6 +44,9 @@ for(const raw of fs.readFileSync(script,'utf8').split(/\r?\n/)){
 const fd=fs.openSync(out,'wx');
 const trace={schema:1,source:'dah2-xemu-logical-pad',port,script:path.resolve(script),
  inputBoundary:'0x00296224',watchAddress:watchAddress===null?null:`0x${watchAddress.toString(16).padStart(8,'0')}`,startedAt:new Date().toISOString(),events:[],
+ callers:{},
+ deltas:{},
+ processed:[],
  limitation:'Synthetic XPP API results; excludes physical-controller fidelity and wall-clock timing because debugger stops perturb execution'};
 const socket=net.createConnection({host:'127.0.0.1',port});
 socket.setNoDelay(true);
@@ -109,6 +112,12 @@ try{
    break;
   }
   const stack=await read(esp,12),ret=stack.readUInt32LE(0),state=stack.readUInt32LE(8);
+  const caller=`0x${ret.toString(16).padStart(8,'0')}`;
+  trace.callers[caller]=(trace.callers[caller]||0)+1;
+  const deltaBits=(await read((esp+0x38)>>>0,4)).readUInt32LE(0);
+  const delta=`0x${deltaBits.toString(16).padStart(8,'0')}`;
+  trace.deltas[delta]=(trace.deltas[delta]||0)+1;
+  if(samples<4)trace.processed.push({sample:samples,bytes:(await read(0x0030f42c,32)).toString('hex')});
   const pad=Buffer.alloc(22);
   for(const event of events){
    if(samples<event.start||samples>=event.start+event.duration)continue;

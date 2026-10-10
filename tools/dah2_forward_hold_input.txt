@@ -1,0 +1,3 @@
+# Hold full forward on the left stick for deterministic gameplay parity probes.
+# start duration buttons a b lx ly rx ry
+0 10000 0000 0 0 0 30000 0 0

@@ -28,7 +28,15 @@ assert "vibration suppressed" in code
 assert "dah2_scripted_xinput_get_state();" in code
 assert "esp += 12u;    /* ret 8 */" in code
 assert "memcpy(manual_mem8(output), state, sizeof(state))" in code
-assert "XInputGetState(" not in code and "GetAsyncKeyState(" not in code
+scripted = re.search(
+    r"static void dah2_scripted_xinput_get_state\(void\)\n\{.*?^\}",
+    code,
+    re.M | re.S,
+).group()
+assert "XInputGetState(" not in scripted and "GetAsyncKeyState(" not in scripted
+assert "dah2_live_input_fill(state);" in scripted
+assert "xbox_InputGetState(port, &pad)" in code
+assert "GetAsyncKeyState(vk)" in code
 assert "SwitchDesktop" not in code and "SetThreadDesktop" not in code
 assert "[IO.Path]::GetFullPath([string]$Environment['DAH2_INPUT_SCRIPT'], $project)" in launcher
 assert "Assert-PlainPath $inputScript $false" in launcher

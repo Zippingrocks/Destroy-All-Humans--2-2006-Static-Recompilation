@@ -29,6 +29,8 @@ static uint32_t eax,ecx,edx,esp,ebx,esi,edi,ebp;
 volatile uint32_t g_dah2_input_polls,g_dah2_input_latest_packet,g_dah2_input_latest_buttons;
 #define MEM32(a) (*(uint32_t *)(memory+(uint32_t)(a)))
 static unsigned char *manual_mem8(uint32_t a) {CHECK(a<sizeof(memory));return memory+a;}
+static int dah2_hidden_input_enabled(void) {return 1;}
+static void dah2_live_input_fill(unsigned char *state) {(void)state;}
 '''
 suffix = r'''
 int main(void) {
@@ -67,9 +69,13 @@ with tempfile.TemporaryDirectory(prefix="dah2-input-counter-") as directory:
     schedule=out/"schedule.txt"
     schedule.write_text("2 1 0010 0 0 0 0 0 0\n4 1 0000 12 34 -32768 32767 -1 1 56 78 90 123 200 255\n",encoding="utf-8")
     (out/"counter.c").write_text(prefix+event+"\n"+body+suffix,encoding="utf-8")
-    command=f'call "{vcvars}" >nul && cl /nologo /Od /TC counter.c /Fe:counter.exe'
-    subprocess.run('cmd.exe /d /s /c "'+command+'"',cwd=out,check=True,
-                   creationflags=subprocess.CREATE_NO_WINDOW)
+    build_cmd=out/"build.cmd"
+    build_cmd.write_text(f'@call "{vcvars}" >nul\n@cl /nologo /Od /TC counter.c /Fe:counter.exe\n',encoding="utf-8")
+    compiled=subprocess.run(["cmd.exe", "/d", "/c", "build.cmd"],cwd=out,
+                            capture_output=True,text=True,creationflags=subprocess.CREATE_NO_WINDOW)
+    if compiled.returncode:
+        print(compiled.stdout+compiled.stderr)
+    compiled.check_returncode()
     result=subprocess.run([str(out/"counter.exe")],env=dict(os.environ,DAH2_INPUT_SCRIPT=str(schedule)),
                           capture_output=True,text=True,timeout=10,creationflags=subprocess.CREATE_NO_WINDOW)
     if result.returncode:
