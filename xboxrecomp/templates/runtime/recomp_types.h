@@ -147,6 +147,38 @@ extern RECOMP_TLS uint32_t g_ebp;
    and the FNSTSW that reads it can land in different bodies, and the control
    word has to survive a call. (g_fp_stack/g_fp_top are declared above.) */
 extern RECOMP_TLS uint16_t g_fp_control_word;
+
+/* Apply the x87 precision-control field after arithmetic.  The retail Xbox
+ * control word commonly selects PC=00 (24-bit significand), so retaining host
+ * double intermediates changes controller smoothing, simulation, and
+ * quaternion low bits even when the eventual store is single precision. */
+static __forceinline double RECOMP_X87_APPLY_PRECISION(double value,
+                                                       uint16_t control)
+{
+    uint16_t precision = (uint16_t)((control >> 8) & 3u);
+    uint16_t rounding = (uint16_t)((control >> 10) & 3u);
+    float rounded;
+
+    if (precision != 0u || !isfinite(value)) {
+        /* PC=10 maps to host double. PC=11 requests the 64-bit x87
+         * significand, which this double-backed runtime cannot represent. */
+        return value;
+    }
+
+    rounded = (float)value;
+    if (rounding == 1u && (double)rounded > value) {
+        rounded = nextafterf(rounded, -INFINITY);
+    } else if (rounding == 2u && (double)rounded < value) {
+        rounded = nextafterf(rounded, INFINITY);
+    } else if (rounding == 3u) {
+        if (value > 0.0 && (double)rounded > value) {
+            rounded = nextafterf(rounded, -INFINITY);
+        } else if (value < 0.0 && (double)rounded < value) {
+            rounded = nextafterf(rounded, INFINITY);
+        }
+    }
+    return (double)rounded;
+}
 extern RECOMP_TLS int g_fp_cmp;
 
 /* Result of an x87 compare, in the shape the status word wants:

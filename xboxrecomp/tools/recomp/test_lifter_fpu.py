@@ -62,7 +62,8 @@ class FpuLifterTest(unittest.TestCase):
 
         self.assertEqual(
             Lifter().lift_instruction(instruction),
-            ["fp_top() = fp_top() / MEMF(0x123456); "
+            ["fp_top() = RECOMP_X87_APPLY_PRECISION(fp_top() / "
+             "MEMF(0x123456), g_fp_control_word); "
              "/* fdiv dword ptr [0x00123456] */"],
         )
 
@@ -72,7 +73,17 @@ class FpuLifterTest(unittest.TestCase):
 
         self.assertEqual(
             Lifter().lift_instruction(instruction),
-            ["fp_top() = fp_top() * fp_st1(); /* fmul st(1) */"],
+            ["fp_top() = RECOMP_X87_APPLY_PRECISION(fp_top() * fp_st1(), "
+             "g_fp_control_word); /* fmul st(1) */"],
+        )
+
+    def test_arithmetic_and_sqrt_honor_guest_precision_control(self):
+        instruction = Instruction(0, 2, "fsqrt", "", "d9fa")
+
+        self.assertEqual(
+            Lifter().lift_instruction(instruction),
+            ["fp_top() = RECOMP_X87_APPLY_PRECISION(sqrt(fp_top()), "
+             "g_fp_control_word); /* fsqrt */"],
         )
 
     def test_translated_functions_share_runtime_fpu_state(self):
@@ -114,6 +125,7 @@ class FpuLifterTest(unittest.TestCase):
         self.assertIn("extern RECOMP_TLS double g_fp_stack[8];", main)
         self.assertIn("extern RECOMP_TLS int g_fp_top;", main)
         self.assertIn("extern RECOMP_TLS uint16_t g_fp_control_word;", runtime_types)
+        self.assertIn("RECOMP_X87_APPLY_PRECISION", runtime_types)
         self.assertIn("#define RECOMP_PARITY8(x)", runtime_types)
         self.assertIn("extern RECOMP_TLS uint16_t g_fp_control_word;", main)
 

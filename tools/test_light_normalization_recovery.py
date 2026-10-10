@@ -29,7 +29,7 @@ assert [(i.mnemonic, i.op_str) for i in retail] == [
 ]
 source = (ROOT / "src/recomp/gen/recomp_0008.c").read_text(encoding="utf-8")
 body = re.search(r"^void sub_0013C3C0\(void\)\n\{.*?^\}", source, re.M | re.S).group()
-assert "SET_HI8(eax, comparison == 2" in body
+assert "_sse_lahf_a = xmm0.f[0]" in body
 
 PREFIX = r'''
 #include <math.h>
@@ -45,6 +45,20 @@ static RecompXmm xmm0,other_xmm[7];
 static double g_fp_stack[8];
 static int g_fp_top,g_fp_cmp;
 static uint16_t g_fp_control_word;
+static double RECOMP_X87_APPLY_PRECISION(double value,uint16_t control) {
+    uint16_t precision=(uint16_t)((control>>8)&3u);
+    uint16_t rounding=(uint16_t)((control>>10)&3u);
+    float rounded;
+    if(precision!=0u||!isfinite(value)) return value;
+    rounded=(float)value;
+    if(rounding==1u&&(double)rounded>value) rounded=nextafterf(rounded,-INFINITY);
+    else if(rounding==2u&&(double)rounded<value) rounded=nextafterf(rounded,INFINITY);
+    else if(rounding==3u) {
+        if(value>0.0&&(double)rounded>value) rounded=nextafterf(rounded,-INFINITY);
+        else if(value<0.0&&(double)rounded<value) rounded=nextafterf(rounded,INFINITY);
+    }
+    return (double)rounded;
+}
 static unsigned char memory[0x300000],expected_memory[0x300000];
 static uint32_t branch_test_byte;
 static int branch_parity;
@@ -149,7 +163,7 @@ vcvars = Path("C:/Program Files/Microsoft Visual Studio/2022/Community/VC/Auxili
 with tempfile.TemporaryDirectory(prefix="dah2-light-normalization-") as temp:
     temp = Path(temp)
     for name, implementation in (("recovered", body), ("historical", re.sub(
-            r"    \{\n        int comparison = RECOMP_FCMP.*?^    \}\n", "", body, flags=re.M | re.S))):
+            r"^    \{ float _sse_lahf_a = .*? /\* ucomiss; lahf \*/\r?\n", "", body, flags=re.M))):
         (temp / f"{name}.c").write_text(PREFIX + implementation + SUFFIX, encoding="utf-8")
         command = f'call "{vcvars}" >nul && cl /nologo /Od /W3 /TC {name}.c /Fe:{name}.exe'
         compiled = subprocess.run('cmd.exe /d /s /c "' + command + '"', cwd=temp,

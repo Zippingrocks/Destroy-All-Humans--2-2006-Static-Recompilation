@@ -2363,8 +2363,11 @@ class Lifter:
 
             def _combine(dst, src):
                 if cop in ("+", "*") or not reverse:
-                    return f"{dst} = {dst} {cop} {src};"
-                return f"{dst} = {src} {cop} {dst};"   # reversed sub/div
+                    expr = f"{dst} {cop} {src}"
+                else:
+                    expr = f"{src} {cop} {dst}"   # reversed sub/div
+                return (f"{dst} = RECOMP_X87_APPLY_PRECISION({expr}, "
+                        f"g_fp_control_word);")
 
             # Memory operand: dst is st0, no pop (memory forms never pop).
             if ops and ops[0].type == "mem":
@@ -2411,7 +2414,8 @@ class Lifter:
         if m == "fabs":
             return [f"fp_top() = fabs(fp_top()); /* fabs */"]
         if m == "fsqrt":
-            return [f"fp_top() = sqrt(fp_top()); /* fsqrt */"]
+            return [f"fp_top() = RECOMP_X87_APPLY_PRECISION(sqrt(fp_top()), "
+                    f"g_fp_control_word); /* fsqrt */"]
         # x87 transcendentals. None of these were implemented, so every one fell
         # through to the unknown-op path and left the FP stack untouched --
         # silently, because an unimplemented FPU op looks exactly like an
