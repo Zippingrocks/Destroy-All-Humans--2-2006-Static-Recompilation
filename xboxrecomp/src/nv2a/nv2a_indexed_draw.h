@@ -818,6 +818,10 @@ static IDirect3DTexture8 *pgraph_surface_texture(uint32_t guest_offset) {
 
 static void pgraph_report_surface(uint32_t guest_offset,const char *label);
 
+/* Region of the last rect depth clear.  The radar/panel code clears a rect, then draws oversized geometry (map plane, outline) that the
+ * original pipeline keeps inside that rect; depth-writing draws are scissored to it until the next full depth clear. */
+static int g_pg_rect_clip=0;static int g_pg_rect_clip_box[4];
+
 /* The guest clears depth/stencil inside a rectangle (the radar disc, HUD panels) while the rest of the world depth must survive.
  * D3D11 cannot clear a sub-rect of a DSV, so draw a depth-writing (and stencil-replacing) quad under a scissor instead.
  * Returns 1 if handled; 0 means the clear covers the whole target (or the device refused) and the full clear applies. */
@@ -829,10 +833,14 @@ static int pgraph_clear_depth_rect(uint32_t flags,float depth,unsigned stencil) 
     if(slot<0 || !dev || getenv("DAH2_NO_RECT_CLEAR")) return 0;
     unsigned sw=g_pg.array_surfaces[slot].width,sh=g_pg.array_surfaces[slot].height;
     if(xmax<xmin || ymax<ymin) return 1;
-    if(xmin==0 && ymin==0 && xmax+1>=sw && ymax+1>=sh) return 0;
+    if(xmin==0 && ymin==0 && xmax+1>=sw && ymax+1>=sh) { if(flags&1) g_pg_rect_clip=0; return 0; }
     if(xmax+1>sw) xmax=sw-1;
     if(ymax+1>sh) ymax=sh-1;
     if(pgraph_bind_array_target(dev)) return 0;
+    if((flags&1) && !getenv("DAH2_NO_RECT_SCISSOR")) {
+        g_pg_rect_clip=1;g_pg_rect_clip_box[0]=(int)xmin;g_pg_rect_clip_box[1]=(int)ymin;
+        g_pg_rect_clip_box[2]=(int)xmax+1;g_pg_rect_clip_box[3]=(int)ymax+1;
+    }
     D3DVIEWPORT8 viewport={0,0,sw,sh,0,1};
     struct { float x,y,z,rhw; DWORD color; } quad[4]={
         {(float)xmin,(float)ymin,depth,1.0f,0},{(float)(xmax+1),(float)ymin,depth,1.0f,0},
@@ -1950,7 +1958,16 @@ static void submit_indexed_draw(void) {
                 g_pg.alpha_test,PG_REG(NV097_SET_ALPHA_FUNC),PG_REG(NV097_SET_ALPHA_REF),g_pg.blend_enable,g_pg.blend_sfactor,g_pg.blend_dfactor,
                 g_pg.color_mask,g_pg.cull_enable,PG_REG(NV097_SET_CONTROL0),PG_REG(NV097_SET_WINDOW_CLIP_HORIZONTAL),PG_REG(NV097_SET_WINDOW_CLIP_VERTICAL),
                 g_pg.surface_clip_h,g_pg.surface_clip_v,scene_min_x,scene_max_x,scene_min_y,scene_max_y,"\n");
-            fprintf(stdout,"   wclip type=%u:",PG_REG(NV097_SET_WINDOW_CLIP_TYPE));
+            if(profile>=PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT2) {
+                const PgraphSceneVertex *zv=(const PgraphSceneVertex *)vertices;
+                unsigned znv=scene_triangle_list ? scene_triangle_vertex_count : g_pg.index_count;
+                float zlo=INFINITY,zhi=-INFINITY;
+                for(unsigned i=0;i<znv;i++) { if(zv[i].z<zlo) zlo=zv[i].z; if(zv[i].z>zhi) zhi=zv[i].z; }
+                fprintf(stdout,"   zrange=%.5f..%.5f\n",zlo,zhi);
+            }
+            fprintf(stdout,"   shaderstage=%08X combctl=%08X tex:",PG_REG(NV097_SET_SHADER_STAGE_PROGRAM),PG_REG(NV097_SET_COMBINER_CONTROL));
+            for(unsigned s=0;s<4;s++) fprintf(stdout," [%u ctl=%08X off=%08X fmt=%08X]",s,PG_REG(NV097_SET_TEXTURE_CONTROL0+s*0x40),PG_REG(NV097_SET_TEXTURE_OFFSET+s*0x40),PG_REG(NV097_SET_TEXTURE_FORMAT+s*0x40));
+            fprintf(stdout,"\n   wclip type=%u:",PG_REG(NV097_SET_WINDOW_CLIP_TYPE));
             for(unsigned r=0;r<8;r++) fprintf(stdout," %08X/%08X",PG_REG(NV097_SET_WINDOW_CLIP_HORIZONTAL+r*4),PG_REG(NV097_SET_WINDOW_CLIP_VERTICAL+r*4));
             fprintf(stdout,"\n");
             if(profile>=PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT2 && g_pg.index_count<=12) {
@@ -1977,6 +1994,11 @@ static void submit_indexed_draw(void) {
     }
     unsigned primitives=scene_triangle_list ? scene_triangle_vertex_count/3u :
         (g_pg.draw_mode==5 ? g_pg.index_count/3 : g_pg.index_count-2);
+    {   /* DAH2_SKIP_DRAW=<tex0 hex>[:<vertex count>]: skip matching draws (diagnostic) */
+        static unsigned skip_tex=0,skip_count=0;static int skip_init=0;
+        if(!skip_init) { const char *e=getenv("DAH2_SKIP_DRAW"); skip_init=1; if(e) sscanf(e,"%x:%u",&skip_tex,&skip_count); }
+        if(skip_tex && PG_REG(NV097_SET_TEXTURE_OFFSET)==skip_tex && (!skip_count || skip_count==g_pg.index_count)) primitives=0;
+    }
     /* A scene strip may be fully rejected by the NV2A near-plane clip.  Xbox
      * treats the resulting zero-primitive submission as a successful no-op;
      * the D3D11 compatibility path rejects it as E_INVALIDARG. */
@@ -1990,6 +2012,12 @@ static void submit_indexed_draw(void) {
         if(top<cy) top=cy;
         if(right>cw) right=cw;
         if(bottom>ch) bottom=ch;
+        if(g_pg_rect_clip && g_pg.depth_test && PG_REG(NV097_SET_DEPTH_MASK)) {
+            if(left<g_pg_rect_clip_box[0]) left=g_pg_rect_clip_box[0];
+            if(top<g_pg_rect_clip_box[1]) top=g_pg_rect_clip_box[1];
+            if(right>g_pg_rect_clip_box[2]) right=g_pg_rect_clip_box[2];
+            if(bottom>g_pg_rect_clip_box[3]) bottom=g_pg_rect_clip_box[3];
+        }
         if(left>0 || top>0 || right<sw || bottom<sh) d3d8_states_set_scissor(1,left,top,right>left?right:left,bottom>top?bottom:top);
     }
     HRESULT draw_result=primitives ? dev->lpVtbl->DrawPrimitiveUP(dev,
