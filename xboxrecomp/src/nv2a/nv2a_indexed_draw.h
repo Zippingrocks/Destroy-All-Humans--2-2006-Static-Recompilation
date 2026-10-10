@@ -366,7 +366,6 @@ static uint32_t pgraph_supported_array_state(unsigned profile) {
         {NV097_SET_TRANSFORM_EXECUTION_MODE,6}, {NV097_SET_TRANSFORM_PROGRAM_CXT_WRITE_EN,0},
         {NV097_SET_CONTEXT_DMA_A,3}, {NV097_SET_CONTEXT_DMA_VERTEX_A,3},
         {NV097_SET_CONTEXT_DMA_VERTEX_B,3},
-        {NV097_SET_STENCIL_TEST_ENABLE,0},
         {NV097_SET_POLY_OFFSET_FILL_ENABLE,0}, {NV097_SET_SHADE_MODE,0x1D01},
         {NV097_SET_FRONT_POLYGON_MODE,0x1B02}, {NV097_SET_BACK_POLYGON_MODE,0x1B02},
         {NV097_SET_CLIP_MIN,0},
@@ -379,7 +378,8 @@ static uint32_t pgraph_supported_array_state(unsigned profile) {
         !(g_pg.index_source==3u && !g_pg.depth_test &&
           PG_REG(NV097_SET_SURFACE_FORMAT)==0x128u))
         return NV097_SET_SURFACE_FORMAT;
-    { uint32_t equation=PG_REG(NV097_SET_BLEND_EQUATION);
+    if (profile<PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT2 && PG_REG(NV097_SET_STENCIL_TEST_ENABLE)) return NV097_SET_STENCIL_TEST_ENABLE;
+    if (g_pg.blend_enable) { uint32_t equation=PG_REG(NV097_SET_BLEND_EQUATION);
       if(equation!=0x8006 && equation!=0x8007 && equation!=0x8008 && equation!=0x800A && equation!=0x800B)
           return NV097_SET_BLEND_EQUATION; }
     if (PG_REG(NV097_SET_FOG_ENABLE)>1 || (PG_REG(NV097_SET_FOG_ENABLE) &&
@@ -1315,9 +1315,16 @@ static void submit_indexed_draw(void) {
             g_pg.depth_test,PG_REG(NV097_SET_DEPTH_FUNC),PG_REG(NV097_SET_DEPTH_MASK),
             g_pg.blend_enable,PG_REG(NV097_SET_TEXTURE_OFFSET));
         fflush(stdout);
-    }    unsigned telemetry_sequence=freeze_major_telemetry ?
+    }    /* DAH2_TELEMETRY_ONLY_COUNT=N keeps the 64-entry telemetry ring for draws with exactly N indices (others share the last slot). */
+    static int only_count_cfg=-1;
+    if(only_count_cfg<0) { const char *v=getenv("DAH2_TELEMETRY_ONLY_COUNT"); only_count_cfg=v ? atoi(v) : 0; }
+    unsigned telemetry_sequence=freeze_major_telemetry ?
         g_dah2_pgraph_draw_telemetry_cursor : g_dah2_pgraph_draw_telemetry_cursor++;
     unsigned telemetry_slot=telemetry_sequence%64u;
+    if(only_count_cfg>0 && g_pg.index_count!=(unsigned)only_count_cfg) {
+        if(!freeze_major_telemetry) g_dah2_pgraph_draw_telemetry_cursor--;
+        telemetry_slot=63u;
+    } else if(only_count_cfg>0) telemetry_slot=telemetry_sequence%63u;
     volatile Dah2PgraphDrawTelemetry *telemetry=&g_dah2_pgraph_draw_telemetry[telemetry_slot];
     telemetry->profile=profile;telemetry->count=g_pg.index_count;telemetry->mode=g_pg.draw_mode;
     telemetry->target=PG_REG(NV097_SET_SURFACE_COLOR_OFFSET);telemetry->texture=PG_REG(NV097_SET_TEXTURE_OFFSET);
@@ -1682,7 +1689,13 @@ static void submit_indexed_draw(void) {
 #define PG_RS(state,value) PG_CALL(dev->lpVtbl->SetRenderState(dev,state,value))
 #define PG_TSS(state,value) PG_CALL(dev->lpVtbl->SetTextureStageState(dev,0,state,value))
 #define PG_TSS_STAGE(stage,state,value) PG_CALL(dev->lpVtbl->SetTextureStageState(dev,stage,state,value))
+    /* Scene draws carry surface-absolute pixel coordinates; the surface clip only limits where they may land (scissor below).  The older
+     * title/menu profiles keep the clip-sized viewport (their clip equals the surface). */
     D3DVIEWPORT8 viewport={0,0,g_pg.surface_clip_h>>16,g_pg.surface_clip_v>>16,0,1};
+    if(profile>=PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT2) {
+        int viewport_slot=pgraph_surface_index(PG_REG(NV097_SET_SURFACE_COLOR_OFFSET));
+        if(viewport_slot>=0) { viewport.Width=g_pg.array_surfaces[viewport_slot].width;viewport.Height=g_pg.array_surfaces[viewport_slot].height; }
+    }
     PG_CALL(dev->lpVtbl->SetViewport(dev,&viewport));
     int scene_solid_diag=profile>=PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT2 &&
         getenv("DAH2_SCENE_SOLID_DIAGNOSTIC") && getenv("DAH2_TEST_WINDOW_HIDDEN");
@@ -1725,7 +1738,25 @@ static void submit_indexed_draw(void) {
     PG_RS(D3DRS_FILLMODE,D3DFILL_SOLID);PG_RS(D3DRS_SHADEMODE,2 /* D3DSHADE_GOURAUD */);
     PG_RS(D3DRS_ZENABLE,scene_no_depth_diag ? FALSE : g_pg.depth_test);
     PG_RS(D3DRS_ZWRITEENABLE,scene_no_depth_diag ? FALSE : PG_REG(NV097_SET_DEPTH_MASK)!=0);
-    PG_RS(D3DRS_ZFUNC,PG_REG(NV097_SET_DEPTH_FUNC)-0x1FF);PG_RS(D3DRS_STENCILENABLE,FALSE);
+    PG_RS(D3DRS_ZFUNC,PG_REG(NV097_SET_DEPTH_FUNC)-0x1FF);
+    { /* NV2A stencil -> host stencil (D24S8 depth buffers); the minimap and HUD masks rely on it. */
+      int stencil=PG_REG(NV097_SET_STENCIL_TEST_ENABLE)!=0 && profile>=PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT2;
+      PG_RS(D3DRS_STENCILENABLE,stencil);
+      if(stencil) {
+          static const uint32_t gl_ops[8]={NV097_SET_STENCIL_OP_V_KEEP,NV097_SET_STENCIL_OP_V_ZERO,NV097_SET_STENCIL_OP_V_REPLACE,
+              NV097_SET_STENCIL_OP_V_INCRSAT,NV097_SET_STENCIL_OP_V_DECRSAT,NV097_SET_STENCIL_OP_V_INVERT,
+              NV097_SET_STENCIL_OP_V_INCR,NV097_SET_STENCIL_OP_V_DECR};
+          static const DWORD d3d_ops[8]={1,2,3,4,5,6,7,8};
+          DWORD ops[3]={1,1,1};
+          const uint32_t regs3[3]={PG_REG(NV097_SET_STENCIL_OP_FAIL),PG_REG(NV097_SET_STENCIL_OP_ZFAIL),PG_REG(NV097_SET_STENCIL_OP_ZPASS)};
+          for(unsigned o=0;o<3;o++) for(unsigned k=0;k<8;k++) if(regs3[o]==gl_ops[k]) ops[o]=d3d_ops[k];
+          PG_RS(D3DRS_STENCILFUNC,PG_REG(NV097_SET_STENCIL_FUNC)-0x1FF);
+          PG_RS(D3DRS_STENCILREF,PG_REG(NV097_SET_STENCIL_FUNC_REF)&255u);
+          PG_RS(D3DRS_STENCILMASK,PG_REG(NV097_SET_STENCIL_FUNC_MASK)&255u);
+          PG_RS(D3DRS_STENCILWRITEMASK,(PG_REG(NV097_SET_CONTROL0)&NV097_SET_CONTROL0_STENCIL_WRITE_ENABLE) ? (PG_REG(NV097_SET_STENCIL_MASK)&255u) : 0u);
+          PG_RS(D3DRS_STENCILFAIL,ops[0]);PG_RS(D3DRS_STENCILZFAIL,ops[1]);PG_RS(D3DRS_STENCILPASS,ops[2]);
+      }
+    }
     PG_RS(D3DRS_CULLMODE,scene_no_cull_diag ? D3DCULL_NONE :
         (g_pg.cull_enable ? D3DCULL_CCW : D3DCULL_NONE));
     PG_RS(D3DRS_ALPHATESTENABLE,scene_no_alpha_diag ? FALSE : g_pg.alpha_test);PG_RS(D3DRS_ALPHAFUNC,PG_REG(NV097_SET_ALPHA_FUNC)-0x1FF);
@@ -1853,10 +1884,14 @@ static void submit_indexed_draw(void) {
     if(profile>=PGRAPH_ARRAY_PROFILE_DAH2_SCENE_LIT2) {
         uint32_t wh=PG_REG(NV097_SET_WINDOW_CLIP_HORIZONTAL),wv=PG_REG(NV097_SET_WINDOW_CLIP_VERTICAL);
         int left=(int)(wh&0xFFFu),right=(int)((wh>>16)&0xFFFu),top=(int)(wv&0xFFFu),bottom=(int)((wv>>16)&0xFFFu);
-        int cw=(int)(g_pg.surface_clip_h>>16),ch=(int)(g_pg.surface_clip_v>>16);
+        int cx=(int)(g_pg.surface_clip_h&0xFFFFu),cy=(int)(g_pg.surface_clip_v&0xFFFFu);
+        int cw=cx+(int)(g_pg.surface_clip_h>>16),ch=cy+(int)(g_pg.surface_clip_v>>16);
+        int sw=(int)viewport.Width,sh=(int)viewport.Height;
+        if(left<cx) left=cx;
+        if(top<cy) top=cy;
         if(right>cw) right=cw;
         if(bottom>ch) bottom=ch;
-        if(left>0 || top>0 || right<cw || bottom<ch) d3d8_states_set_scissor(1,left,top,right>left?right:left,bottom>top?bottom:top);
+        if(left>0 || top>0 || right<sw || bottom<sh) d3d8_states_set_scissor(1,left,top,right>left?right:left,bottom>top?bottom:top);
     }
     HRESULT draw_result=primitives ? dev->lpVtbl->DrawPrimitiveUP(dev,
         scene_triangle_list || g_pg.draw_mode==5 ? D3DPT_TRIANGLELIST : D3DPT_TRIANGLESTRIP,

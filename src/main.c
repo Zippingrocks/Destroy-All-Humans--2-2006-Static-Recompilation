@@ -40,6 +40,7 @@
 #include <intrin.h>
 #include <mmsystem.h>
 #include "boot_window.h"
+#include "apu.h"
 #include "trace_control.h"
 
 /* TEMP diagnostic: a process-wide hang was observed after truncated-
@@ -329,13 +330,20 @@ static LONG CALLBACK veh_handler(PEXCEPTION_POINTERS ep)
         }
         fflush(stdout);
         /* DAH2_CRASH_HOLD also parks on a guest int3 (CRT terminate/_amsg paths) so the process can be inspected. */
-        if (ep->ExceptionRecord->ExceptionCode == 0x80000003u && getenv("DAH2_CRASH_HOLD")) {
+        if ((ep->ExceptionRecord->ExceptionCode == 0x80000003u || ep->ExceptionRecord->ExceptionCode == 0xC0000094u) && getenv("DAH2_CRASH_HOLD")) {
             fputs("[CRASH] holding at guest int3 (DAH2_CRASH_HOLD)\n", stdout); fflush(stdout);
             for (;;) Sleep(1000);
         }
     }
     if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
         uintptr_t fault_addr = ep->ExceptionRecord->ExceptionInformation[1];
+        {   /* MCPX APU register / voice-processor window (DAH2_APU=1): decode the faulting access and run the APU handler */
+            uint32_t fault_va = (uint32_t)(fault_addr - (uintptr_t)g_xbox_mem_offset);
+            if (g_apu_state && fault_va >= 0xFE800000u && fault_va < 0xFE830000u &&
+                apu_hook_handle_mmio(ep->ContextRecord, fault_addr, fault_va,
+                                     ep->ExceptionRecord->ExceptionInformation[0] == 1))
+                return EXCEPTION_CONTINUE_EXECUTION;
+        }
 
         /*
          * GPU register probe at 0xFD000000 range.
@@ -477,6 +485,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     }
 
     g_xbox_mem_offset = xbox_GetMemoryOffset();
+    if (getenv("DAH2_APU")) {
+        /* ram_ptr is the base of physical RAM as the APU's DMA sees it: physical page P is the contiguous window at 0x80000000+P. */
+        g_apu_state = mcpx_apu_init_standalone((uint8_t *)((uintptr_t)g_xbox_mem_offset + XBOX_CONTIG_BASE));
+        if (g_apu_state) xbox_McpxApuHookEnable();
+    }
     printf("Xbox memory mapped. Offset: 0x%llX\n", (unsigned long long)g_xbox_mem_offset);
     dah2_boot_window_set_status("Xbox memory mapped; initializing kernel bridge...");
 

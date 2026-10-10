@@ -87,9 +87,9 @@ PROBES = {
 }
 # Functions whose RETURN value we also want: renamed to *_inner and wrapped.
 SAP_HOOKS = (0x1D23C0,0x1D4FE0,0x1D28C0,0x1D54A0,0x1D3A10,0x1D0F30,0x1D0FA0,0x1D0FC0,0x1D1550,0x1D0030,0x1D3C50,0x1CFF10,0x1D3280,0x1D5870)
-NOTE_HOOKS = {0x0015ECA0: "dah2_note(0x15ECA0, g_ecx, MEM32(g_ecx + 0x524), MEM32(g_ecx + 0xEC));", 0x00147DC0: "dah2_note(0x147DC0, g_ecx, MEM32(g_ecx + 0x18), MEM32(g_ecx + 0x20));", 0x00148560: "dah2_note(0x148560, g_ecx, MEM32(g_ecx + 0x18), MEM32(g_ecx + 0x20));"}
+NOTE_HOOKS = {0x0015ECA0: "dah2_note(0x15ECA0, g_ecx, MEM32(g_ecx + 0x524), MEM32(g_ecx + 0xEC));", 0x00147DC0: "dah2_note(0x147DC0, g_ecx, MEM32(g_ecx + 0x18), MEM32(g_ecx + 0x20));", 0x00148560: "dah2_note(0x148560, g_ecx, MEM32(g_ecx + 0x18), MEM32(g_ecx + 0x20));", 0x000F96C0: "dah2_alloc_caller(MEM32(g_esp), MEM32(g_esp + 4), 0);", 0x000F96E0: "dah2_alloc_caller(MEM32(g_esp), MEM32(g_esp + 4), 1); dah2_alloc_caller(0x10000000u | MEM32(MEM32(MEM32(MEM32(0x2C9640u) + 0xFCu)) + 8u), 0, 0);", 0x001AE2F0: "dah2_alloc_caller(0x1AE2F0, 0, 0);", 0x001AE650: "dah2_alloc_caller(0x1AE650, 0, 0);"}
 REGCHK_ON = True
-PATH_FUNCS = (0x00177FB0, 0x001777C0, 0x001732D0, 0x00172590)
+PATH_FUNCS = (0x00177FB0,)
 ESP_NOTE_LABELS = ("00178294", "001782B2", "001783AE", "001783BA", "001783CC", "00178411", "00178426", "00178466", "0017848F", "00178C56")
 RET_PROBES = ()
 pat = re.compile(r"^(void sub_([0-9A-F]{8})\(void\)\s*\n\{)", re.M)
@@ -120,10 +120,13 @@ for src in sys.argv[2:]:
                                 "{ sub_%08X_inner(); DAH2_FNT_PROBE(0x%08Xu, g_eax, g_esp, g_ecx, 1); }" % (_a, _a | 0x80000000) +
                                 chr(10) + "void sub_%08X_inner(void)" % _a + chr(10) + "{", 1)
     # guest heap shadow checker: wrap the pool allocator's alloc (0x13F390) and free (0x13FFC0)
-    for _a, _pre, _post in ((0x0013F390, "uint32_t _a1 = MEM32(g_esp + 4), _a2 = MEM32(g_esp + 8), _ra = MEM32(g_esp);", "dah2_heap_alloc(g_eax, _a1, _a2, _ra);"),
-                            (0x0013FFC0, "dah2_heap_free(MEM32(g_esp + 4), MEM32(g_esp));", ""),
+    for _a, _pre, _post in ((0x0013F390, "uint32_t _a1 = MEM32(g_esp + 4), _a2 = MEM32(g_esp + 8), _ra = MEM32(g_esp); if (_ra == 0x000F96D3u) _ra = MEM32(g_esp + 12);", "dah2_heap_alloc(g_eax, _a1, _a2, _ra);"),
+                            (0x0013FFC0, "uint32_t _fp = MEM32(g_esp + 4), _fq = _fp, _fh = 0, _fb = 0; if (_fp >= 0x80000000u && _fp < 0x90000000u) { while (MEM32(_fq - 4u) == 0xFFFFFFFFu) _fq -= 4u; _fh = _fq - 0xCu; _fb = MEM32(_fh + 4u); } dah2_heap_free(MEM32(g_esp + 4), MEM32(g_esp));", "dah2_alloc_caller(0x20000001u, 0, 0); if (_fp >= 0x80000000u && _fp < 0x90000000u) dah2_alloc_caller(0x20000002u, 0, 0); if (_fh) dah2_alloc_caller(0x20000003u, 0, 0); if ((_fb & ~1u) >= 150000u) dah2_alloc_caller(0x20000004u, 0, 0);"),
                             (0x001A7680, "uint32_t _a1 = MEM32(g_esp + 4), _a2 = 0, _ra = MEM32(g_esp);", "dah2_sheap_alloc(g_eax, _a1, _ra);"),
-                            (0x001A76E0, "dah2_sheap_free(MEM32(g_esp + 4), MEM32(g_esp));", "")):
+                            (0x001A76E0, "dah2_sheap_free(MEM32(g_esp + 4), MEM32(g_esp));", ""),
+                            (0x000F96E0, "uint32_t _fp = MEM32(g_esp + 4), _fq = _fp, _fh = 0, _fb = 0; if (_fp >= 0x80000000u && _fp < 0x90000000u) { while (MEM32(_fq - 4u) == 0xFFFFFFFFu) _fq -= 4u; _fh = _fq - 0xCu; _fb = MEM32(_fh + 4u); }", "if (_fh && g_fnt_on) dah2_free_probe(_fp, _fh, _fb, MEM32(_fh + 4u), MEM32(0x30D864u), g_esp);"),
+                            (0x001AE2F0, "uint32_t _ct = g_ecx;", "dah2_arena(0, MEM32(_ct + 0x44));"),
+                            (0x001AE650, "uint32_t _ct = g_ecx; dah2_arena(1, MEM32(_ct + 0x44));", "")):
         _hdr = "void sub_%08X(void)" % _a + chr(10) + "{"
         if _hdr in text and "void sub_%08X_hinner(void)" % _a not in text:
             text = text.replace(_hdr, "void sub_%08X_hinner(void);" % _a + chr(10) + "extern void dah2_heap_alloc(uint32_t, uint32_t, uint32_t, uint32_t); extern void dah2_heap_free(uint32_t, uint32_t); extern void dah2_sheap_alloc(uint32_t, uint32_t, uint32_t); extern void dah2_sheap_free(uint32_t, uint32_t);" + chr(10) +

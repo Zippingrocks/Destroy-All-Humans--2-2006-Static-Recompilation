@@ -89,7 +89,7 @@ if nn_:
     _shown = 0
     for k in range(max(0, nn_ - 1024), nn_):
         w = struct.unpack_from("<8I", npb, (k & 1023) * 32)
-        if not (w[0] in (0x1BAD, 0x52AE) or 0x178294 <= w[0] <= 0x178C56 or k >= nn_ - 12): continue
+        if not (w[0] in (0x1BAD, 0x52AE, 0x13FFC0) or 0x178294 <= w[0] <= 0x178C56 or k >= nn_ - 12): continue
         _shown += 1
         if _shown > 120 and k < nn_ - 12: continue
         print("note #%d tag %x native %d a=%08x b=%08x c=%08x tid %d [c]=%08x [c+4]=%08x" % ((k,) + w))

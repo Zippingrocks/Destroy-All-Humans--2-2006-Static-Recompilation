@@ -380,6 +380,7 @@ typedef VOID (__stdcall *PXBOX_SYSTEM_ROUTINE)(PVOID StartContext);
  * MmAllocateContiguousMemory hands back addresses inside it, and
  * MmClaimGpuInstanceMemory reports GPU instance memory at its top. Shared so
  * the layout and the bridges cannot disagree about where it is. */
+void xbox_McpxApuHookEnable(void);
 #define XBOX_CONTIG_BASE 0x80000000u
 #define XBOX_CONTIG_SIZE (128u * 1024u * 1024u)
 

@@ -185,7 +185,10 @@ static void parse_output(DWORD dword, NV2ACombinerOutput *output)
     output->cd_dot     = (dword >> 12) & 1;
     output->ab_dot     = (dword >> 13) & 1;
     output->mux_sum    = (dword >> 14) & 1;
-    output->output_map = (NV2AOutputMapping)((dword >> 15) & 0x7);
+    {   /* bits [17:15]: 0 identity, 1 bias, 2 shift left 1, 3 shift left 1 + bias, 4 shift left 2, 6 shift right 1 (xemu PS_COMBINEROUTPUT_*) */
+        unsigned m = (dword >> 15) & 0x7u;
+        output->output_map = m == 6u ? NV2A_OUT_SHIFTRIGHT_1 : m == 5u || m == 7u ? NV2A_OUT_IDENTITY : (NV2AOutputMapping)m;
+    }
 }
 
 /* ================================================================
@@ -577,7 +580,7 @@ int d3d8_combiners_generate_hlsl(const NV2ACombinerState *state,
 
     /* Temporary registers: R0 initialized to T0 (NV2A convention),
      * R1 initialized to zero */
-    EMIT("    float4 r_r0 = r_t0;\n");
+    EMIT("    float4 r_r0 = float4(0, 0, 0, %s);\n", state->tex_mode[0] != NV2A_TEXMODE_NONE ? "r_t0.a" : "1.0");
     EMIT("    float4 r_r1 = float4(0, 0, 0, 0);\n\n");
 
     /* ---- General combiner stages ---- */
@@ -645,15 +648,15 @@ int d3d8_combiners_generate_hlsl(const NV2ACombinerState *state,
 
         /* Write to destination registers */
         if (rgb_out->ab_dst != NV2A_REG_ZERO) {
-            EMIT("        %s.rgb = %sab_rgb%s;\n",
+            EMIT("        %s.rgb = clamp(%sab_rgb%s, -1.0, 1.0);\n",
                  reg_name(rgb_out->ab_dst), omp, oms);
         }
         if (rgb_out->cd_dst != NV2A_REG_ZERO) {
-            EMIT("        %s.rgb = %scd_rgb%s;\n",
+            EMIT("        %s.rgb = clamp(%scd_rgb%s, -1.0, 1.0);\n",
                  reg_name(rgb_out->cd_dst), omp, oms);
         }
         if (rgb_out->sum_dst != NV2A_REG_ZERO) {
-            EMIT("        %s.rgb = %ssum_rgb%s;\n",
+            EMIT("        %s.rgb = clamp(%ssum_rgb%s, -1.0, 1.0);\n",
                  reg_name(rgb_out->sum_dst), omp, oms);
         }
 
@@ -692,15 +695,15 @@ int d3d8_combiners_generate_hlsl(const NV2ACombinerState *state,
         oms = output_map_suffix(alpha_out->output_map);
 
         if (alpha_out->ab_dst != NV2A_REG_ZERO) {
-            EMIT("        %s.a = %sab_a%s;\n",
+            EMIT("        %s.a = clamp(%sab_a%s, -1.0, 1.0);\n",
                  reg_name(alpha_out->ab_dst), omp, oms);
         }
         if (alpha_out->cd_dst != NV2A_REG_ZERO) {
-            EMIT("        %s.a = %scd_a%s;\n",
+            EMIT("        %s.a = clamp(%scd_a%s, -1.0, 1.0);\n",
                  reg_name(alpha_out->cd_dst), omp, oms);
         }
         if (alpha_out->sum_dst != NV2A_REG_ZERO) {
-            EMIT("        %s.a = %ssum_a%s;\n",
+            EMIT("        %s.a = clamp(%ssum_a%s, -1.0, 1.0);\n",
                  reg_name(alpha_out->sum_dst), omp, oms);
         }
 

@@ -77,10 +77,15 @@ static uint32_t h_block_of(uint32_t p)
     while (h_rd32(p - 4u) == 0xFFFFFFFFu && n++ < 64) p -= 4u;
     return p - 0xCu;
 }
+uint32_t g_fnt_alloc_null_log[16][2];
+volatile uint32_t g_fnt_alloc_null, g_fnt_big_allocs, g_fnt_big_frees;
+uint32_t g_fnt_bigalloc[48][12];
+volatile uint32_t g_fnt_bigalloc_n;
 void dah2_heap_alloc(uint32_t ptr, uint32_t size, uint32_t align, uint32_t ra)
 {
     uint32_t blk, total, g, g1, tid = GetCurrentThreadId(), seq; (void)size; (void)align;
     w_log(1, ptr, size, ra);
+    if (!ptr && g_fnt_on) { if (g_fnt_alloc_null < 16u) { g_fnt_alloc_null_log[g_fnt_alloc_null][0] = size; g_fnt_alloc_null_log[g_fnt_alloc_null][1] = ra; } g_fnt_alloc_null++; }
     if (!ptr || ptr < DAH2_H_LO + 0x20u || ptr >= DAH2_H_HI) return;
     if (!h_init()) return;
     { static int armed; extern volatile uint32_t g_fnt_vm_on;
@@ -92,6 +97,13 @@ void dah2_heap_alloc(uint32_t ptr, uint32_t size, uint32_t align, uint32_t ra)
       if (!armed) return; }
     blk = h_block_of(ptr); total = (h_rd32(blk + 4u) & ~1u) + 0xCu;
     if (blk < DAH2_H_LO || total > 0x10000000u || blk + total > DAH2_H_HI) return;
+    if (total >= 150000u) g_fnt_big_allocs++;
+    if (total >= 150000u && g_fnt_bigalloc_n < 48u) {   /* who makes the very large blocks: the code-address words on the guest stack above the allocator */
+        extern __declspec(thread) uint32_t g_esp; uint32_t *e = g_fnt_bigalloc[g_fnt_bigalloc_n], k, w = 0, sp = g_esp;
+        e[0] = total; e[1] = ptr;
+        for (k = 0; k < 160u && w < 10u; ++k) { uint32_t v = h_rd32(sp + 4u * k); if (v >= 0x11000u && v < 0x226000u) e[2 + w++] = v; }
+        g_fnt_bigalloc_n++;
+    }
     AcquireSRWLockExclusive(&g_hlock);
     if (!g_hfirst_tid) g_hfirst_tid = tid; else if (tid != g_hfirst_tid) g_fnt_heap_threads |= 1u;
     seq = ++g_hseq; ++g_fnt_heap_allocs;
@@ -114,6 +126,7 @@ void dah2_heap_free(uint32_t ptr, uint32_t ra)
     if (!seq) { h_event(2, blk, 0, ra, GetCurrentThreadId(), 0); ReleaseSRWLockExclusive(&g_hlock); return; }
     r = &g_hrec[seq & (DAH2_HREC_N - 1u)];
     if (r->start != blk) { h_event(3, blk, 0, ra, GetCurrentThreadId(), seq); ReleaseSRWLockExclusive(&g_hlock); return; }
+    if (r->size >= 150000u) g_fnt_big_frees++;
     for (g1 = (blk + r->size - DAH2_H_LO + 3u) >> 2; g < g1; ++g) if (g_howner[g] == seq) g_howner[g] = 0;
     ReleaseSRWLockExclusive(&g_hlock);
 }
@@ -481,15 +494,60 @@ void dah2_loopchk(uint32_t i, uint32_t n, uint32_t esp, uint32_t reset)
     prev = i;
 }
 
+/* ---- allocation / free counts per caller of the game's allocator wrappers (0xF96C0 alloc, 0xF96E0 free) ------------------------ */
+typedef struct { uint32_t ra, allocs, bytes, frees; } fnt_acaller_t;
+fnt_acaller_t g_fnt_acaller[4096];
+void dah2_alloc_caller(uint32_t ra, uint32_t size, uint32_t is_free)
+{
+    uint32_t h, n;
+    if (!g_fnt_on) return;
+    h = (ra * 2654435761u) >> 20;
+    for (n = 0; n < 4096u; ++n, h = (h + 1u) & 4095u) {
+        fnt_acaller_t *e = &g_fnt_acaller[h];
+        if (e->ra == 0 || e->ra == ra) {
+            e->ra = ra;
+            if (is_free) e->frees++; else { e->allocs++; e->bytes += size; }
+            return;
+        }
+    }
+}
+
+/* stream-buffer pointer log: kind 0 = constructor stored it, kind 1 = destructor is about to free it */
+uint32_t g_fnt_arena[2][1024];
+volatile uint32_t g_fnt_arena_n[2];
+void dah2_arena(uint32_t kind, uint32_t ptr)
+{
+    uint32_t i;
+    if (!g_fnt_on || kind > 1u) return;
+    i = g_fnt_arena_n[kind]++;
+    if (i < 1024u) g_fnt_arena[kind][i] = ptr;
+}
+
+/* allocator free probe: chunk header size word before/after the game's free() for large aligned chunks */
+uint32_t g_fnt_free_log[64][6];
+volatile uint32_t g_fnt_free_log_n;
+void dah2_free_probe(uint32_t ptr, uint32_t hdr, uint32_t before, uint32_t after, uint32_t freebytes, uint32_t top)
+{
+    uint32_t i;
+    if (!g_fnt_on || (before & ~1u) < 150000u || g_fnt_free_log_n >= 64u) return;
+    i = g_fnt_free_log_n++;
+    g_fnt_free_log[i][0] = ptr; g_fnt_free_log[i][1] = hdr; g_fnt_free_log[i][2] = before; g_fnt_free_log[i][3] = after; g_fnt_free_log[i][4] = freebytes; g_fnt_free_log[i][5] = top;
+}
+
 /* ---- ring of the last indirect-call targets (RECOMP_ICALL_SAFE sites) ---------------------------------------------------- */
 uint32_t g_fnt_ics[512][4];
 uint32_t g_fnt_ics2[64][6];
 volatile uint32_t g_fnt_ics2_n;
 volatile uint32_t g_fnt_ics_n;
+volatile uint32_t g_fnt_icall_line;        /* set from outside: histogram the targets of the ICALL_SAFE at this generated-source line */
+uint32_t g_fnt_icall_hist[64][2];
 void dah2_icall_seen(uint32_t va, uint32_t esp, uint32_t ecx, uint32_t line)
 {
     uint32_t q;
     if (!g_fnt_on || va == 0u) return;
+    if (g_fnt_icall_line && h_rd32(esp) == g_fnt_icall_line) {
+        uint32_t k; for (k = 0; k < 64u; ++k) { if (g_fnt_icall_hist[k][0] == va) { g_fnt_icall_hist[k][1]++; break; } if (!g_fnt_icall_hist[k][0]) { g_fnt_icall_hist[k][0] = va; g_fnt_icall_hist[k][1] = 1; break; } }
+    }
     q = (g_fnt_ics_n++) & 511u; g_fnt_ics[q][0] = va; g_fnt_ics[q][1] = esp; g_fnt_ics[q][2] = ecx; g_fnt_ics[q][3] = line;
     if (line == 66411u) { static uint32_t s_n; uint32_t k = (s_n++) & 63u; extern uint32_t g_fnt_ics2[64][6]; extern volatile uint32_t g_fnt_ics2_n;
         g_fnt_ics2[k][0] = va; g_fnt_ics2[k][1] = esp; g_fnt_ics2[k][2] = ecx; g_fnt_ics2[k][3] = h_rd32(ecx); g_fnt_ics2[k][4] = h_rd32(esp + 4u); g_fnt_ics2[k][5] = s_n; g_fnt_ics2_n = s_n; }

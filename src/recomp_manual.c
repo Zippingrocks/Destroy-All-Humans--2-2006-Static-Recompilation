@@ -1562,10 +1562,15 @@ void sub_000F96E0(void)
     g_ecx = g_eax;
     g_esp -= 4; *manual_mem32(g_esp) = 0x000F96F1u;
 
-    if (target >= 0x00400000u && target < 0xFE000000u) {
+    /* Dispatch unless the target is in the "garbage VA" range (>= 0x400000 and below the kernel thunks), exactly like RECOMP_ICALL_SAFE.
+     * This condition used to be written the other way round, which made every free through this wrapper (target 0x13FFC0, a valid
+     * code address) a silent no-op -- the guest heap leaked everything freed here and ran out of memory a few minutes into play. */
+    if (target != 0u && !(target >= 0x00400000u && target < 0xFE000000u)) {
+        uint32_t _pe = g_esi, _pd = g_edi, _pb = g_ebx;
         recomp_func_t fn = recomp_lookup_manual(target);
         if (!fn) fn = recomp_lookup(target);
         if (fn) fn();
+        g_esi = _pe; g_edi = _pd; g_ebx = _pb;
     }
     g_esp = saved_esp;  /* restore: callee ABI (ret 0 vs ret 4) varies */
     g_esp += 4;         /* ret 0: pop sub_000F96E0's return address */

@@ -21,6 +21,17 @@ MCPXAPUState *mcpx_apu_init_standalone(uint8_t *ram_ptr);
 /* Shut down and free the APU state. */
 void mcpx_apu_shutdown(MCPXAPUState *d);
 
+/* Global APU state used by the MMIO hook (apu_mmio_hook.c); NULL until mcpx_apu_init_standalone ran. */
+extern MCPXAPUState *g_apu_state;
+
+#if defined(_WIN32)
+#include <stdbool.h>
+#include <windows.h>
+/* Called from the host exception handler for an access violation inside the APU register window (0xFE800000..): decodes the faulting
+ * x86-64 load/store, runs the APU register handler and advances RIP.  Returns false if the instruction form is not recognised. */
+bool apu_hook_handle_mmio(PCONTEXT ctx, uintptr_t fault_addr, uint32_t fault_xbox_va, int is_write);
+#endif
+
 /* MMIO read from APU register space (addr is offset from 0xFE800000). */
 uint64_t mcpx_apu_mmio_read(MCPXAPUState *d, uint64_t addr, unsigned int size);
 

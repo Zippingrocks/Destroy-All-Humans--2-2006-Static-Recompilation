@@ -60,3 +60,6 @@ extern uint32_t dah2_log_sort(uint32_t self, uint32_t arr, uint32_t box, uint32_
 #endif
 extern volatile uint32_t g_fnt_hw_gate, g_fnt_hw_auto, g_fnt_hw_addr;
 extern void dah2_loopchk(uint32_t i, uint32_t n, uint32_t esp, uint32_t reset);
+extern void dah2_alloc_caller(uint32_t ra, uint32_t size, uint32_t is_free);
+extern void dah2_arena(uint32_t kind, uint32_t ptr);
+extern void dah2_free_probe(uint32_t ptr, uint32_t hdr, uint32_t before, uint32_t after, uint32_t freebytes, uint32_t top);

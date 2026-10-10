@@ -206,6 +206,10 @@ static const struct { uint32_t offset; uint32_t value; } MCPX_DSP_WORDS[] = {
 };
 
 static void *g_mcpx_regs = NULL;
+/* Set once the MCPX APU emulation owns the first 0x30000 bytes of the aperture (register + voice-processor window): those pages are
+ * PAGE_NOACCESS so guest accesses fault into apu_hook_handle_mmio, and the ack thread must not touch them. */
+static volatile LONG g_mcpx_apu_hooked = 0;
+#define XBOX_MCPX_APU_HOOK_SIZE 0x30000u
 
 static DWORD WINAPI nv2a_ack_thread(LPVOID param)
 {
@@ -242,7 +246,7 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
                     *w = MCPX_DSP_WORDS[i].value;
                 }
             }
-            for (size_t i = 0; i < sizeof(MCPX_COUNTERS) / sizeof(MCPX_COUNTERS[0]); i++) {
+            if (!g_mcpx_apu_hooked) for (size_t i = 0; i < sizeof(MCPX_COUNTERS) / sizeof(MCPX_COUNTERS[0]); i++) {
                 volatile uint32_t *c =
                     (volatile uint32_t *)((char *)g_mcpx_regs + MCPX_COUNTERS[i]);
                 *c += 1;
@@ -264,6 +268,18 @@ static DWORD WINAPI nv2a_ack_thread(LPVOID param)
         Sleep(1);
     }
     return 0;
+}
+
+/* Hand the APU register window to the APU emulation (apu_mmio_hook.c): guest loads/stores to 0xFE800000..0xFE82FFFF now fault and are
+ * decoded by the VEH.  The DSP words further up the aperture stay plain memory. */
+void xbox_McpxApuHookEnable(void)
+{
+    DWORD old = 0;
+    if (!g_mcpx_memory) return;
+    InterlockedExchange(&g_mcpx_apu_hooked, 1);
+    Sleep(5); /* let an in-flight ack-thread pass finish before the pages go away */
+    if (!VirtualProtect(g_mcpx_memory, XBOX_MCPX_APU_HOOK_SIZE, PAGE_NOACCESS, &old))
+        fprintf(stderr, "  WARNING: APU window protect failed (error %lu)\n", GetLastError());
 }
 
 static void xbox_Nv2aAckStart(void)
