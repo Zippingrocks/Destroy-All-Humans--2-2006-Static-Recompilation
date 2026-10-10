@@ -18,6 +18,8 @@ const seconds=Number(option('--seconds','5'));
 const bootSeconds=Number(option('--boot-seconds','0'));
 const watchText=option('--watch-address',null);
 const watchAddress=watchText===null?null:Number(watchText);
+const watchKind=option('--watch-kind','write');
+const watchTypes={write:2,read:3,access:4};
 const leaveStopped=args.includes('--leave-stopped');
 if(!script||!out)throw new Error('--script and --out are required');
 if(!fs.existsSync(script)||fs.existsSync(out))throw new Error('script must exist and output must be new');
@@ -25,6 +27,7 @@ if(!Number.isSafeInteger(port)||port<1||port>65535)throw new Error('invalid port
 if(!Number.isFinite(seconds)||seconds<1||seconds>60)throw new Error('invalid seconds');
 if(!Number.isFinite(bootSeconds)||bootSeconds<0||bootSeconds>120)throw new Error('invalid boot seconds');
 if(watchAddress!==null&&(!Number.isSafeInteger(watchAddress)||watchAddress<0||watchAddress>0xffffffff))throw new Error('invalid watch address');
+if(!(watchKind in watchTypes))throw new Error('--watch-kind must be write, read, or access');
 
 const events=[];
 for(const raw of fs.readFileSync(script,'utf8').split(/\r?\n/)){
@@ -43,7 +46,7 @@ for(const raw of fs.readFileSync(script,'utf8').split(/\r?\n/)){
 
 const fd=fs.openSync(out,'wx');
 const trace={schema:1,source:'dah2-xemu-logical-pad',port,script:path.resolve(script),
- inputBoundary:'0x00296224',watchAddress:watchAddress===null?null:`0x${watchAddress.toString(16).padStart(8,'0')}`,startedAt:new Date().toISOString(),events:[],
+ inputBoundary:'0x00296224',watchAddress:watchAddress===null?null:`0x${watchAddress.toString(16).padStart(8,'0')}`,watchKind,startedAt:new Date().toISOString(),events:[],
  callers:{},
  deltas:{},
  processed:[],
@@ -89,7 +92,7 @@ try{
  if(await rsp.packet(`Z1,${inputSite.toString(16)},1`)!=='OK')throw new Error('hardware breakpoint rejected');
  armed=true;
  if(watchAddress!==null){
-  if(await rsp.packet(`Z2,${watchAddress.toString(16)},4`)!=='OK')throw new Error('hardware watchpoint rejected');
+  if(await rsp.packet(`Z${watchTypes[watchKind]},${watchAddress.toString(16)},4`)!=='OK')throw new Error('hardware watchpoint rejected');
   watchArmed=true;
  }
  const deadline=performance.now()+seconds*1000;
@@ -141,7 +144,7 @@ try{
 finally{
  if(running){socket.write(Buffer.from([3]));try{await rsp.nextPacket(5000);}catch{}}
  if(armed)try{await rsp.packet(`z1,${inputSite.toString(16)},1`);}catch{}
- if(watchArmed)try{await rsp.packet(`z2,${watchAddress.toString(16)},4`);}catch{}
+ if(watchArmed)try{await rsp.packet(`z${watchTypes[watchKind]},${watchAddress.toString(16)},4`);}catch{}
  if(!leaveStopped)rsp.resume();
  rsp.close();
  trace.samples=samples;trace.finishedAt=new Date().toISOString();

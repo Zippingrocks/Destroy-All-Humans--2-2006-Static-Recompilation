@@ -13,6 +13,9 @@ counter_lines = [
     "    g_dah2_input_polls = poll + 1u;\n",
     "    g_dah2_input_latest_packet = packet;\n",
     "    g_dah2_input_latest_buttons = (uint32_t)(state[4] | ((unsigned)state[5] << 8));\n",
+    "    g_dah2_input_latest_delta_bits = caller_delta_bits;\n",
+    "    memcpy((void *)g_dah2_input_latest_sticks, state + 14,\n",
+    "           sizeof(g_dah2_input_latest_sticks));\n",
 ]
 for line in counter_lines:
     assert body.count(line) == 1
@@ -27,6 +30,8 @@ prefix = r'''
 static unsigned char memory[0x40000],expected[0x40000];
 static uint32_t eax,ecx,edx,esp,ebx,esi,edi,ebp;
 volatile uint32_t g_dah2_input_polls,g_dah2_input_latest_packet,g_dah2_input_latest_buttons;
+volatile uint32_t g_dah2_input_latest_delta_bits;
+volatile int16_t g_dah2_input_latest_sticks[4];
 #define MEM32(a) (*(uint32_t *)(memory+(uint32_t)(a)))
 static unsigned char *manual_mem8(uint32_t a) {CHECK(a<sizeof(memory));return memory+a;}
 static int dah2_hidden_input_enabled(void) {return 1;}
@@ -43,6 +48,7 @@ int main(void) {
         memset(memory,0xCD,sizeof(memory));
         eax=0xAABBCCDD;ecx=1;edx=2;esp=initial;ebx=3;esi=4;edi=5;ebp=6;
         MEM32(esp)=0x10295D;MEM32(esp+4)=0xDA220000;MEM32(esp+8)=output;
+        MEM32(esp+0x38)=0x3D072B02;
         memcpy(expected,memory,sizeof(memory));
         memcpy(wanted,&packet,4);memcpy(wanted+4,&buttons,2);
         if(poll==4) {
@@ -58,8 +64,10 @@ int main(void) {
         CHECK(g_dah2_input_polls==poll+1);
         CHECK(g_dah2_input_latest_packet==packet);
         CHECK(g_dah2_input_latest_buttons==buttons);
+        CHECK(g_dah2_input_latest_delta_bits==0x3D072B02);
+        CHECK(memcmp((const void *)g_dah2_input_latest_sticks,wanted+14,8)==0);
     }
-    puts("PASS: eight native polls; Start/neutral/analog payload and packet counters, RET8 ABI, exact RAM/GPRs unchanged, invalid output remains unwritten");
+    puts("PASS: eight native polls; exact timing/buttons/axes telemetry, RET8 ABI, RAM/GPRs unchanged, invalid output remains unwritten");
     return 0;
 }
 '''

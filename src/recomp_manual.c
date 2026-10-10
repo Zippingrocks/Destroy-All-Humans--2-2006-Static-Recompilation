@@ -47,6 +47,7 @@ typedef void (*recomp_func_t)(void);
 /* Forward declarations for functions used before their definition in this file */
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va);
 extern recomp_func_t recomp_lookup(uint32_t xbox_va);
+uint64_t recomp_rdtsc(void);
 
 /* ── Register state (defined in xbox_memory_layout.c) ──────── */
 
@@ -2848,6 +2849,8 @@ static int g_dah2_input_reported;
 volatile uint32_t g_dah2_input_polls;
 volatile uint32_t g_dah2_input_latest_packet;
 volatile uint32_t g_dah2_input_latest_buttons;
+volatile uint32_t g_dah2_input_latest_delta_bits;
+volatile int16_t g_dah2_input_latest_sticks[4];
 
 /* Read-only parity counters.  These stay out of the guest address space and
  * let hidden runs prove whether the recovered title-vector callbacks execute
@@ -3169,6 +3172,7 @@ static void dah2_scripted_xinput_get_state(void)
     static int loaded, have_previous;
     unsigned char state[22] = {0};
     uint32_t output = MEM32(esp + 8u);
+    uint32_t caller_delta_bits = MEM32(esp + 0x38u);
     unsigned i;
 
     if (!loaded && dah2_hidden_input_enabled() == 2) loaded = 1;
@@ -3257,6 +3261,9 @@ static void dah2_scripted_xinput_get_state(void)
     g_dah2_input_polls = poll + 1u;
     g_dah2_input_latest_packet = packet;
     g_dah2_input_latest_buttons = (uint32_t)(state[4] | ((unsigned)state[5] << 8));
+    g_dah2_input_latest_delta_bits = caller_delta_bits;
+    memcpy((void *)g_dah2_input_latest_sticks, state + 14,
+           sizeof(g_dah2_input_latest_sticks));
     ++poll;
     eax = 0;       /* ERROR_SUCCESS */
     esp += 12u;    /* ret 8 */
@@ -6263,6 +6270,22 @@ void sub_00223180(void)
     g_esp += 0x40;
     g_esp += 4;
 }
+
+/*
+ * Retail reads the Xbox 733.33 MHz time-stamp counter and converts it to
+ * integer milliseconds with (tsc * 3) / 0x2191C0.  The generated host shim
+ * previously used GetTickCount(), whose ~15.6 ms quanta turn a 30 Hz loop
+ * into a 31/47 ms sawtooth.  Several game clocks clamp those long samples,
+ * making animation, cutscenes, and player control run visibly slow even while
+ * the presentation counter still reports 30 FPS.
+ */
+void sub_0013D4B0(void)
+{
+    g_eax = (uint32_t)((recomp_rdtsc() * 3ull) / 0x2191C0ull);
+    g_edx = 0;
+    g_esp += 4u;
+}
+
 recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
 {
     /*
@@ -6314,6 +6337,7 @@ recomp_func_t recomp_lookup_manual(uint32_t xbox_va)
     if (xbox_va == 0x0026875B) return init_dsound_0026875B;
     if (xbox_va == 0x00267D4D) return sub_00267D4D;
     if (xbox_va == 0x000B3500) return sub_000B3500;
+    if (xbox_va == 0x0013D4B0) return sub_0013D4B0;
     return (recomp_func_t)0;
 }
 
