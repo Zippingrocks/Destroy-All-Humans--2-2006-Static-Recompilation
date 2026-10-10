@@ -10,6 +10,7 @@ source = (ROOT / "src/recomp_manual.c").read_text(encoding="utf-8")
 input_source = (ROOT / "xboxrecomp/src/input/xinput_device.c").read_text(encoding="utf-8")
 assert "XBOX_BUTTON_BLACK] =\n        (xi_state.Gamepad.wButtons & XINPUT_GAMEPAD_RIGHT_SHOULDER)" in input_source
 assert "XBOX_BUTTON_WHITE] =\n        (xi_state.Gamepad.wButtons & XINPUT_GAMEPAD_LEFT_SHOULDER)" in input_source
+assert "XInputGetState(dwPort, &state) == ERROR_SUCCESS" in input_source
 event = re.search(r"typedef struct Dah2InputEvent \{.*?\} Dah2InputEvent;", source, re.S).group()
 body = re.search(r"static void dah2_scripted_xinput_get_state\(void\)\n\{.*?^\}", source, re.M | re.S).group()
 counter_lines = [
@@ -39,7 +40,7 @@ volatile int16_t g_dah2_input_latest_sticks[4];
 #define MEM32(a) (*(uint32_t *)(memory+(uint32_t)(a)))
 static unsigned char *manual_mem8(uint32_t a) {CHECK(a<sizeof(memory));return memory+a;}
 static int dah2_hidden_input_enabled(void) {return 1;}
-static void dah2_live_input_fill(unsigned char *state, unsigned port) {(void)state;(void)port;}
+static unsigned long dah2_live_input_fill(unsigned char *state, unsigned port) {(void)state;(void)port;return 0;}
 '''
 suffix = r'''
 int main(void) {

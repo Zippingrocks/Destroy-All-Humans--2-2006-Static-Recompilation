@@ -3107,13 +3107,16 @@ static int dah2_hidden_input_enabled(void)
 
 #include "boot_window.h"
 extern unsigned long xbox_InputGetState(unsigned long port, void *state);
+extern unsigned long xbox_InputSetState(unsigned long port, const void *vibration);
+extern int xbox_InputIsConnected(unsigned long port);
 
 /* Fill an Xbox gamepad packet (22 bytes at state+4: buttons u16, analog[8], four int16 sticks) from the requested
  * XInput controller, then OR in the keyboard (only while the game window has focus).
  *   WASD left stick, IJKL right stick, arrows D-pad, Enter Start, Esc Back, Space/E A, Q B, F X, R Y, Z left trigger,
  *   C right trigger, 1 Black, 2 White, left Shift left-stick click, left Ctrl right-stick click. */
-static void dah2_live_input_fill(unsigned char *state, unsigned port)
+static unsigned long dah2_live_input_fill(unsigned char *state, unsigned port)
 {
+    unsigned long result = 0x48Fu;
     uint16_t buttons = 0;
     unsigned char analog[8] = {0};
     int16_t stick[4] = {0};
@@ -3122,7 +3125,8 @@ static void dah2_live_input_fill(unsigned char *state, unsigned port)
     if (port < 4u) {
         struct { unsigned long packet; uint16_t buttons; unsigned char analog[8]; int16_t stick[4]; } pad;
         memset(&pad, 0, sizeof(pad));
-        if (xbox_InputGetState(port, &pad) == 0) {
+        result = xbox_InputGetState(port, &pad);
+        if (result == 0) {
             buttons = pad.buttons;
             memcpy(analog, pad.analog, 8);
             memcpy(stick, pad.stick, sizeof(stick));
@@ -3160,8 +3164,19 @@ static void dah2_live_input_fill(unsigned char *state, unsigned port)
     memcpy(state + 4, &buttons, sizeof(buttons));
     memcpy(state + 6, analog, 8);
     memcpy(state + 14, stick, sizeof(stick));
+    /* Port zero is also the keyboard-backed logical Xbox pad. */
+    return port == 0u ? 0u : result;
 }
 
+static uint32_t dah2_input_device_mask(void)
+{
+    uint32_t mask = 1u; /* keyboard-backed logical pad zero */
+    if (dah2_hidden_input_enabled() == 2) {
+        for (uint32_t port = 1u; port < 4u; ++port)
+            if (xbox_InputIsConnected(port)) mask |= 1u << port;
+    }
+    return mask;
+}
 static void dah2_scripted_xinput_get_state(void)
 {
     static Dah2InputEvent events[128];
@@ -3231,8 +3246,13 @@ static void dah2_scripted_xinput_get_state(void)
     }
 
     if (dah2_hidden_input_enabled() == 2) {
-        dah2_live_input_fill(state, port);
+        unsigned long live_result = dah2_live_input_fill(state, port);
         event_count = 0;
+        if (live_result != 0u) {
+            eax = live_result;
+            esp += 12u; /* ret 8 */
+            return;
+        }
     }
     for (i = 0; i < event_count; ++i) {
         const Dah2InputEvent *event = &events[i];
@@ -3274,10 +3294,10 @@ static void dah2_scripted_xinput_get_state(void)
     esp += 12u;    /* ret 8 */
 }
 
-/* Match DAH1's retail-device lifecycle at the Xbox XPP boundary.  These
+/* Match DAH1's retail-device lifecycle at the Xbox XPP boundary. These
  * overrides exist because the game calls them directly, before GetState can
- * ever be reached.  Hidden parity runs expose one private neutral controller;
- * ordinary launches retain the generated Xbox-library behavior verbatim. */
+ * ever be reached. Hidden runs expose one private pad; visible runs expose
+ * the keyboard-backed port zero plus currently connected physical ports. */
 void sub_002961C2(void)
 {
     uint32_t ebp;
@@ -3286,7 +3306,8 @@ void sub_002961C2(void)
         uint32_t port = MEM32(esp + 8u);
         uint32_t slot = MEM32(esp + 12u);
         uint32_t polling = MEM32(esp + 16u);
-        if (port < 4u && slot == 0u) {
+        if (port < 4u && slot == 0u &&
+            (dah2_hidden_input_enabled() == 1 || port == 0u || xbox_InputIsConnected(port))) {
             eax = DAH2_INPUT_HANDLE_BASE + port;
             fprintf(stderr,
                 "[DAH2-INPUT] XInputOpen type=%08X port=%u slot=%u polling=%08X handle=%08X\n",
@@ -3366,12 +3387,18 @@ void sub_00296297(void)
     if (dah2_hidden_input_enabled()) {
         static int logged;
         uint32_t handle = MEM32(esp + 4u);
+        uint32_t vibration = MEM32(esp + 8u);
         uint32_t port = handle - DAH2_INPUT_HANDLE_BASE;
-        eax = port < 4u ? 0u : 0x48Fu;
+        if (port >= 4u || vibration < 0x10000u || vibration > 0x08000000u - 4u)
+            eax = 0x48Fu;
+        else if (dah2_hidden_input_enabled() == 2)
+            eax = xbox_InputSetState(port, manual_mem8(vibration));
+        else
+            eax = 0u; /* hidden parity runs never touch a physical controller */
         if (!logged) {
             fprintf(stderr,
-                "[DAH2-INPUT] XInputSetState handle=%08X vibration suppressed result=%08X\n",
-                handle, eax);
+                "[DAH2-INPUT] XInputSetState handle=%08X forwarded=%u result=%08X\n",
+                handle, dah2_hidden_input_enabled() == 2, eax);
             fflush(stderr);
             logged = 1;
         }
@@ -3406,9 +3433,10 @@ void sub_00296353(void)
     uint32_t saved_entry_esp, target;
     if (dah2_hidden_input_enabled()) {
         uint32_t type = MEM32(esp + 4u);
-        g_dah2_input_reported = 1;
-        eax = 1u;
-        fprintf(stderr, "[DAH2-INPUT] XGetDevices type=%08X mask=00000001\n", type);
+        uint32_t mask = dah2_input_device_mask();
+        g_dah2_input_reported = mask;
+        eax = mask;
+        fprintf(stderr, "[DAH2-INPUT] XGetDevices type=%08X mask=%08X\n", type, mask);
         fflush(stderr);
         esp += 8u; /* ret 4 */
         return;
@@ -3440,15 +3468,17 @@ void sub_00296375(void)
         uint32_t type = MEM32(esp + 4u);
         uint32_t inserted_out = MEM32(esp + 8u);
         uint32_t removed_out = MEM32(esp + 12u);
-        uint32_t inserted = g_dah2_input_reported ? 0u : 1u;
-        g_dah2_input_reported = 1;
+        uint32_t current = dah2_input_device_mask();
+        uint32_t inserted = current & ~g_dah2_input_reported;
+        uint32_t removed = g_dah2_input_reported & ~current;
+        g_dah2_input_reported = current;
         MEM32(inserted_out) = inserted;
-        MEM32(removed_out) = 0;
-        eax = inserted != 0u;
-        if (inserted)
+        MEM32(removed_out) = removed;
+        eax = (inserted | removed) != 0u;
+        if (inserted || removed)
             fprintf(stderr,
-                "[DAH2-INPUT] XGetDeviceChanges type=%08X inserted=00000001\n",
-                type);
+                "[DAH2-INPUT] XGetDeviceChanges type=%08X inserted=%08X removed=%08X\n",
+                type, inserted, removed);
         fflush(stderr);
         esp += 16u; /* ret 12 */
         return;

@@ -91,7 +91,10 @@ DWORD xbox_InputSetState(DWORD dwPort, const XBOX_VIBRATION *pVibration)
 
 BOOL xbox_InputIsConnected(DWORD dwPort)
 {
+    XINPUT_STATE state;
     if (dwPort >= XBOX_MAX_CONTROLLERS) return FALSE;
+    g_controller_connected[dwPort] =
+        XInputGetState(dwPort, &state) == ERROR_SUCCESS;
     return g_controller_connected[dwPort];
 }
 

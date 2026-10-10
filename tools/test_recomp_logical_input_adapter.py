@@ -21,10 +21,10 @@ for symbol in (
 ):
     assert f"void {symbol}(void)" in code
 assert "DAH2_INPUT_HANDLE_BASE + port" in code
-assert "g_dah2_input_reported = 1" in code
+assert "g_dah2_input_reported = mask" in code
 assert "MEM32(inserted_out) = inserted" in code
-assert "MEM32(removed_out) = 0" in code
-assert "vibration suppressed" in code
+assert "MEM32(removed_out) = removed" in code
+assert "xbox_InputSetState(port, manual_mem8(vibration))" in code
 assert "dah2_scripted_xinput_get_state();" in code
 assert "esp += 12u;    /* ret 8 */" in code
 assert "memcpy(manual_mem8(output), state, sizeof(state))" in code
@@ -34,10 +34,13 @@ scripted = re.search(
     re.M | re.S,
 ).group()
 assert "XInputGetState(" not in scripted and "GetAsyncKeyState(" not in scripted
-assert "dah2_live_input_fill(state, port);" in scripted
+assert "dah2_live_input_fill(state, port)" in scripted
 assert "unsigned port = handle - DAH2_INPUT_HANDLE_BASE;" in scripted
 assert "if (port >= 4u)" in scripted and "eax = 0x48Fu" in scripted
 assert "xbox_InputGetState(port, &pad)" in code
+assert "uint32_t current = dah2_input_device_mask();" in code
+assert "uint32_t inserted = current & ~g_dah2_input_reported;" in code
+assert "uint32_t removed = g_dah2_input_reported & ~current;" in code
 assert "GetAsyncKeyState(vk)" in code
 assert "SwitchDesktop" not in code and "SetThreadDesktop" not in code
 assert "[IO.Path]::GetFullPath([string]$Environment['DAH2_INPUT_SCRIPT'], $project)" in launcher
