@@ -3122,14 +3122,23 @@ static unsigned long dah2_live_input_fill(unsigned char *state, unsigned port)
     int16_t stick[4] = {0};
     HWND game = dah2_boot_window_get_hwnd();
     int focused = game && GetForegroundWindow() == game;
-    if (port < 4u) {
+    /* Present one stable logical Xbox controller to the title, as DAH1 does.
+     * Windows can assign the user's only physical pad to any XInput slot. Do
+     * not expose those host slots as extra guest controllers: DAH2 polls all
+     * advertised ports and its frontend treats each packet transition as an
+     * independent menu edge. Alternating a neutral keyboard port with a live
+     * host port consequently repeats/overlaps menu transitions. */
+    if (port == 0u) {
         struct { unsigned long packet; uint16_t buttons; unsigned char analog[8]; int16_t stick[4]; } pad;
-        memset(&pad, 0, sizeof(pad));
-        result = xbox_InputGetState(port, &pad);
-        if (result == 0) {
-            buttons = pad.buttons;
-            memcpy(analog, pad.analog, 8);
-            memcpy(stick, pad.stick, sizeof(stick));
+        for (unsigned host_port = 0u; host_port < 4u; ++host_port) {
+            memset(&pad, 0, sizeof(pad));
+            result = xbox_InputGetState(host_port, &pad);
+            if (result == 0u) {
+                buttons = pad.buttons;
+                memcpy(analog, pad.analog, 8);
+                memcpy(stick, pad.stick, sizeof(stick));
+                break;
+            }
         }
     }
     if (focused) {
@@ -3164,18 +3173,14 @@ static unsigned long dah2_live_input_fill(unsigned char *state, unsigned port)
     memcpy(state + 4, &buttons, sizeof(buttons));
     memcpy(state + 6, analog, 8);
     memcpy(state + 14, stick, sizeof(stick));
-    /* Port zero is also the keyboard-backed logical Xbox pad. */
+    /* Port zero remains connected even without a physical pad so keyboard
+     * navigation cannot make the retail frontend lose its controller. */
     return port == 0u ? 0u : result;
 }
 
 static uint32_t dah2_input_device_mask(void)
 {
-    uint32_t mask = 1u; /* keyboard-backed logical pad zero */
-    if (dah2_hidden_input_enabled() == 2) {
-        for (uint32_t port = 1u; port < 4u; ++port)
-            if (xbox_InputIsConnected(port)) mask |= 1u << port;
-    }
-    return mask;
+    return 1u; /* one stable physical/keyboard-backed logical pad */
 }
 static void dah2_scripted_xinput_get_state(void)
 {
@@ -3306,8 +3311,7 @@ void sub_002961C2(void)
         uint32_t port = MEM32(esp + 8u);
         uint32_t slot = MEM32(esp + 12u);
         uint32_t polling = MEM32(esp + 16u);
-        if (port < 4u && slot == 0u &&
-            (dah2_hidden_input_enabled() == 1 || port == 0u || xbox_InputIsConnected(port))) {
+        if (port == 0u && slot == 0u) {
             eax = DAH2_INPUT_HANDLE_BASE + port;
             fprintf(stderr,
                 "[DAH2-INPUT] XInputOpen type=%08X port=%u slot=%u polling=%08X handle=%08X\n",

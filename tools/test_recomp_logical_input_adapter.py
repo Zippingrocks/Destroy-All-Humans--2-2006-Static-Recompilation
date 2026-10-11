@@ -37,7 +37,11 @@ assert "XInputGetState(" not in scripted and "GetAsyncKeyState(" not in scripted
 assert "dah2_live_input_fill(state, port)" in scripted
 assert "unsigned port = handle - DAH2_INPUT_HANDLE_BASE;" in scripted
 assert "if (port >= 4u)" in scripted and "eax = 0x48Fu" in scripted
-assert "xbox_InputGetState(port, &pad)" in code
+assert "for (unsigned host_port = 0u; host_port < 4u; ++host_port)" in code
+assert "xbox_InputGetState(host_port, &pad)" in code
+assert "return 1u; /* one stable physical/keyboard-backed logical pad */" in code
+assert "if (port == 0u && slot == 0u)" in code
+assert "mask |= 1u << port" not in code
 assert "uint32_t current = dah2_input_device_mask();" in code
 assert "uint32_t inserted = current & ~g_dah2_input_reported;" in code
 assert "uint32_t removed = g_dah2_input_reported & ~current;" in code
