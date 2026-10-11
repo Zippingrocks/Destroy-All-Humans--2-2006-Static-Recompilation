@@ -1,4 +1,5 @@
 #include "boot_window.h"
+#include "dev_console.h"
 #include "dah2_resources.h"
 
 #include <mmsystem.h>
@@ -458,8 +459,12 @@ static LRESULT CALLBACK boot_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         if (wp == VK_RETURN && (lp & (1 << 29))) { boot_toggle_fullscreen(hwnd); return 0; }
         break;
     case WM_KEYDOWN:
+        if (wp == VK_OEM_3 && !(lp & (1u << 30))) { dah2_console_toggle(); return 0; }
         if (wp == VK_F11) { boot_toggle_fullscreen(hwnd); return 0; }
         break;
+    case WM_SIZE:
+        dah2_console_parent_resized();
+        return 0;
     case WM_TIMER:
         if (InterlockedCompareExchange(&g_renderer_owned, 0, 0) == 0 &&
             InterlockedCompareExchange(&g_shell_active, 0, 0) == 0)
@@ -534,6 +539,7 @@ static LRESULT CALLBACK boot_wndproc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         DestroyWindow(hwnd);
         return 0;
     case WM_DESTROY:
+        dah2_console_shutdown();
         g_boot_hwnd = NULL;
         InterlockedExchange(&g_shell_quit, 1);
         if (g_boot_closed)
@@ -581,8 +587,10 @@ static DWORD WINAPI boot_thread_proc(void *ctx)
         (screen_height - window_height) / 2,
         window_width, window_height,
         NULL, NULL, instance, NULL);
-    if (g_boot_hwnd)
+    if (g_boot_hwnd) {
+        dah2_console_initialize(g_boot_hwnd, instance);
         SetTimer(g_boot_hwnd, 1, 16, NULL);
+    }
     SetEvent(g_boot_ready);
     while (g_boot_hwnd && GetMessageA(&msg, NULL, 0, 0) > 0) {
         TranslateMessage(&msg);

@@ -77,6 +77,7 @@ endif()
 set(GAME_SOURCES
     src/main.c
     src/boot_window.c
+    src/dev_console.c
     src/dah2_resources.rc
     src/guest_nv2a_bridge.c
     src/parity_timing.c

@@ -3106,6 +3106,7 @@ static int dah2_hidden_input_enabled(void)
 }
 
 #include "boot_window.h"
+#include "dev_console.h"
 extern unsigned long xbox_InputGetState(unsigned long port, void *state);
 extern unsigned long xbox_InputSetState(unsigned long port, const void *vibration);
 extern int xbox_InputIsConnected(unsigned long port);
@@ -3170,6 +3171,12 @@ static unsigned long dah2_live_input_fill(unsigned char *state, unsigned port)
         if (x || y) { stick[2] = x; stick[3] = y; }
 #undef K
     }
+    if (dah2_console_is_open()) {
+        buttons = 0;
+        memset(analog, 0, sizeof(analog));
+        memset(stick, 0, sizeof(stick));
+    }
+
     memcpy(state + 4, &buttons, sizeof(buttons));
     memcpy(state + 6, analog, 8);
     memcpy(state + 14, stick, sizeof(stick));
